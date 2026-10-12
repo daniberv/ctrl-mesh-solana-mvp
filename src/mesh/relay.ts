@@ -41,12 +41,12 @@ export function createRelay(
     });
     res.end(JSON.stringify(value));
   };
-  const body = async (req: IncomingMessage) => {
+  const body = async (req: IncomingMessage, maximum = 800000) => {
     const buffers: Buffer[] = [];
     let size = 0;
     for await (const b of req) {
       size += b.length;
-      if (size > 800000) throw Error("Request too large");
+      if (size > maximum) throw Error("Request too large");
       buffers.push(b);
     }
     return JSON.parse(Buffer.concat(buffers).toString() || "{}");
@@ -58,8 +58,35 @@ export function createRelay(
       const host = req.headers.host || "";
       if (options.demo && !/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host))
         return json(res, 403, { error: "Local demo host required" });
-      if (req.headers.origin && req.headers.origin !== `http://${host}`)
+      const peerOrigins =
+        engine.consensus?.options.config.members.map(
+          (m) => new URL(m.url).origin
+        ) || [];
+      if (req.headers.origin && peerOrigins.includes(req.headers.origin)) {
+        res.setHeader("Access-Control-Allow-Origin", req.headers.origin);
+        res.setHeader("Vary", "Origin");
+        res.setHeader(
+          "Access-Control-Allow-Headers",
+          "Content-Type, Authorization"
+        );
+        res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        if (req.method === "OPTIONS") {
+          res.writeHead(204);
+          res.end();
+          return;
+        }
+      } else if (req.headers.origin && req.headers.origin !== `http://${host}`)
         return json(res, 403, { error: "Cross-origin requests disabled" });
+      if (path === "/api/ha/rpc" && req.method === "POST" && engine.consensus) {
+        engine.consensus.authorize(
+          (req.headers.authorization || "").replace(/^Bearer /, "")
+        );
+        return json(
+          res,
+          200,
+          engine.consensus.handle(await body(req, 2000000))
+        );
+      }
       if (
         path === "/api/federation/info" &&
         req.method === "GET" &&
@@ -108,8 +135,10 @@ export function createRelay(
         });
         return json(res, 200, { token });
       }
-      if (path === "/api/market" && req.method === "GET")
+      if (path === "/api/market" && req.method === "GET") {
+        await engine.readBarrier();
         return json(res, 200, engine.state.market());
+      }
       if (path === "/api/health" && req.method === "GET")
         return json(res, 200, {
           ok: true,
@@ -119,6 +148,8 @@ export function createRelay(
           demo: !!options.demo,
           readOnly: engine.readOnly,
           federation: options.federation?.info(),
+          ha: engine.consensus?.info(),
+          stream: engine.store.meta("stream"),
         });
       if (options.demo && path === "/api/demo/actors" && req.method === "GET")
         return json(res, 200, options.demo.actors());
@@ -130,6 +161,7 @@ export function createRelay(
         const actor = actorFor(
           (req.headers.authorization || "").replace(/^Bearer /, "")
         );
+        if (req.method === "GET") await engine.readBarrier();
         if (path === "/api/context" && req.method === "GET") {
           const query = new URL(req.url!, "http://localhost").searchParams;
           const snapshot = engine.state.context(actor);
@@ -226,7 +258,11 @@ export function createRelay(
         res.writeHead(200, {
           "Content-Type": mime + "; charset=utf-8",
           "Content-Security-Policy":
-            "default-src 'self'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; style-src 'self'; script-src 'self'; frame-ancestors 'none'",
+            "default-src 'self'; connect-src 'self' ws://127.0.0.1:* ws://localhost:* " +
+            peerOrigins
+              .flatMap((url) => [url, url.replace(/^http/, "ws")])
+              .join(" ") +
+            "; style-src 'self'; script-src 'self'; frame-ancestors 'none'",
         });
         res.end(readFileSync(file));
         return;
@@ -234,9 +270,16 @@ export function createRelay(
       json(res, 404, { error: "Not found" });
     } catch (error) {
       const message = String((error as Error).message || error);
-      json(res, message === "Authentication required" ? 401 : 400, {
-        error: message,
-      });
+      json(
+        res,
+        message === "Authentication required"
+          ? 401
+          : (error as any).status || 400,
+        {
+          error: message,
+          ...(engine.consensus ? { ha: engine.consensus.info() } : {}),
+        }
+      );
     }
   });
   const wss = new WebSocketServer({
@@ -244,6 +287,12 @@ export function createRelay(
     path: "/wire",
     maxPayload: 800000,
   });
+  const leadership = () => {
+    if (engine.consensus && !engine.consensus.writable)
+      for (const socket of wss.clients)
+        socket.close(1012, "Coordinator changed; reconnect with cursor");
+  };
+  engine.consensus?.on("change", leadership);
   wss.on("connection", (socket) => {
     let alive = true;
     socket.on("pong", () => (alive = true));
@@ -323,6 +372,7 @@ export function createRelay(
         }
         actorFor(token);
         if (type === "REQ") {
+          await engine.readBarrier();
           if (subscriptions.size >= 20 && !subscriptions.has(id))
             throw Error("Subscription limit");
           const fs = filters.length ? filters : [{}];
@@ -400,6 +450,7 @@ export function createRelay(
       new Promise<void>((resolve) => {
         for (const client of wss.clients) client.terminate();
         wss.close();
+        engine.consensus?.off("change", leadership);
         server.close(() => resolve());
       }),
   };

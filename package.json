@@ -15,7 +15,10 @@
     "sandbox:new": "bash scripts/new-sandbox.sh",
     "demo:escrow": "ts-node src/demo.ts",
     "web:replica": "ts-node scripts/start-replica.ts",
-    "federation:check": "ts-node scripts/check-replicas.ts"
+    "federation:check": "ts-node scripts/check-replicas.ts",
+    "ha:bootstrap": "ts-node scripts/ha-bootstrap.ts",
+    "ha:demo": "ts-node scripts/ha-demo.ts",
+    "ha:status": "ts-node scripts/ha-status.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.31.1",

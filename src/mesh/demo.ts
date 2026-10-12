@@ -4,6 +4,7 @@ import { Keypair } from "@solana/web3.js";
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "fs";
 import { MeshClient } from "./sdk";
 import { Engine } from "./engine";
+import { signEvent } from "./events";
 export function localKey(name: string) {
   mkdirSync(".mesh/keys", { recursive: true });
   const path = ".mesh/keys/" + name + ".json";
@@ -59,9 +60,13 @@ export const roles = [
     company: "Parallel Labs",
   },
 ];
-export function demoControl(url: string, engine: Engine) {
+export function demoControl(url: string, engine: Engine, replicas?: string[]) {
   const keys = new Map(roles.map((r) => [r.id, localKey(r.id)]));
-  const client = (id: string) => new MeshClient(url, keys.get(id)!);
+  const client = (id: string) =>
+    new MeshClient(url, keys.get(id)!, {
+      replicas: replicas?.filter((r) => r !== url),
+      stream: engine.store.meta("stream"),
+    });
   return {
     actors: () =>
       roles.map((r) => ({ ...r, key: keys.get(r.id)!.publicKey.toBase58() })),
@@ -149,7 +154,9 @@ export function demoControl(url: string, engine: Engine) {
       if (action === "context") return client(input.actor).context();
       if (action === "session")
         return { token: await client(input.actor).authenticate() };
-      if (action === "publish") {
+      if (action === "publish" && input.event)
+        return client(input.actor).publishEvent(input.event);
+      if (action === "publish" || action === "sign") {
         const command = input.command;
         if (command.action === "job.submit" && !command.package) {
           command.package = createWorkPackage(
@@ -161,7 +168,9 @@ export function demoControl(url: string, engine: Engine) {
             }))
           );
         }
-        return client(input.actor).publish(command);
+        return action === "sign"
+          ? { event: signEvent(key, command) }
+          : client(input.actor).publish(command);
       }
       throw Error("Unknown sandbox action");
     },

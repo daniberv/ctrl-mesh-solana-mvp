@@ -2,6 +2,8 @@
 
 ## Two local relays
 
+This section describes the optional **legacy read-only replication mode**. For automatic failover of commands, results and payments, use the [three-node HA mode](high-availability.md). These are separate startup modes; an asynchronous read replica cannot become a writable voter by changing a flag.
+
 Start the validator and coordinator with the README commands, then:
 
 ```sh
@@ -34,7 +36,7 @@ A replica resumes from its durable prefix after a crash. Missing tails are repai
 
 **History availability is required.** The old validator default kept only 10,000 shreds and can prune transactions before a late replica connects. The launcher now keeps 10,000,000 shreds by default, configurable through `MESH_LEDGER_SHREDS`. This is a larger bounded development history, not permanent archival storage. It consumes more disk space. If history has already been pruned, backfill fails explicitly; increasing retention later cannot recover deleted blocks. Preserve an archival ledger for long-lived deployments. Never reset an existing user's journal to work around a failed proof.
 
-The shipped topology has one command coordinator and one or more read replicas. Writes do not fail over automatically. A replica cannot promote its journal through a configuration omission; concurrent independent writers, failover elections, fork rollback and conflict resolution remain future work. Off-chain admission/order is trusted to the explicitly pinned coordinator. This does not claim full decentralized MEP federation.
+This replication mode has one command coordinator and one or more read replicas. Its writes do not fail over automatically. A replica cannot promote its journal through a configuration omission; the separate HA mode requires an explicitly bootstrapped fixed cluster and majority agreement. Concurrent independent writers, public-chain fork rollback and conflict resolution remain future work. Off-chain admission/order in this mode is trusted to the explicitly pinned coordinator. This does not claim full decentralized MEP federation.
 
 ### Agent read fallback
 
@@ -54,7 +56,7 @@ MESH_STREAM=EXPECTED_STREAM_ID \
 yarn mesh watch /secure/path/agent.json /tmp/mesh-cursor
 ```
 
-The SDK pins a stream from the reachable primary when no explicit stream is given; offline startup through a replica requires an explicit stream. Context/history reads and WebSocket reconnects can use a replica of that same stream. Cursors remain comparable. Context includes the serving relay and replication status. An isolated replica serves its last verified state, which may be stale; lag is relative to the last observed upstream head, so inspect `lastSync` and `error` too. Commands remain bound to the configured primary. Authorization/validation failures are not retried against a different relay.
+The SDK pins a stream from the reachable primary when no explicit stream is given; offline startup through a replica requires an explicit stream. Context/history reads and WebSocket reconnects can use a replica of that same stream. Cursors remain comparable. Context includes the serving relay and replication status. An isolated read replica serves its last verified state, which may be stale; lag is relative to the last observed upstream head, so inspect `lastSync` and `error` too. Legacy read replicas reject commands. Configured HA nodes support write failover as described in the separate HA guide. Authorization/validation failures are not retried against a different relay.
 
 ## Encrypted messages and artifacts
 

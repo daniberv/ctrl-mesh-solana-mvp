@@ -8,8 +8,11 @@ import { createWorkPackage, verifyWorkPackage } from "../proof";
 import { verifyPreparedTransaction } from "./transaction";
 import { address, Command, Entry, signEvent, verifyEvent } from "./events";
 export type ClientOptions = {
+  /** Explicitly trusted cluster endpoints, used for reads AND writes. */
   replicas?: string[];
   stream?: string;
+  failoverMs?: number;
+  requestMs?: number;
   encryptionSecret?: Uint8Array;
 };
 class HttpError extends Error {
@@ -49,7 +52,7 @@ export class MeshClient {
         ...(this.token ? { Authorization: "Bearer " + this.token } : {}),
       },
       body: data === undefined ? undefined : JSON.stringify(data),
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(this.options.requestMs || 10000),
       redirect: "error",
     });
     const result = (await r.json()) as any;
@@ -84,8 +87,14 @@ export class MeshClient {
   ): Promise<T> {
     if (!this.options.replicas?.length) {
       const health = await this.request("/api/health");
-      if (this.stream && health.federation?.stream !== this.stream)
+      if (
+        this.stream &&
+        (health.stream || health.federation?.stream) !== this.stream
+      )
         throw Error("Replica stream identity mismatch");
+      this.stream ||= health.stream || health.federation?.stream;
+      if (health.ha && !health.ha.writable)
+        throw new HttpError("Coordinator election in progress", 503);
       return fn(this, health);
     }
     let failure: any;
@@ -95,17 +104,28 @@ export class MeshClient {
       const client =
         url === this.url
           ? this
-          : this.readers.get(url) || new MeshClient(url, this.key);
+          : this.readers.get(url) ||
+            new MeshClient(url, this.key, {
+              requestMs: this.options.requestMs,
+            });
       if (url !== this.url) this.readers.set(url, client);
       try {
         const health = await client.request("/api/health");
-        const stream = health.federation?.stream;
+        const stream = health.stream || health.federation?.stream;
         if (!stream || (this.stream && this.stream !== stream))
           throw new HttpError("Replica stream identity mismatch", 409);
         this.stream = stream;
+        if (health.ha && !health.ha.writable)
+          throw new HttpError("Coordinator election in progress", 503);
         return await fn(client, health);
       } catch (e) {
         if (e instanceof HttpError && e.status < 500) throw e;
+        if (
+          !(e instanceof HttpError) &&
+          !(e instanceof TypeError) &&
+          !(e instanceof DOMException)
+        )
+          throw e;
         failure = e;
       }
     }
@@ -131,6 +151,7 @@ export class MeshClient {
           url: client.url,
           readOnly: !!health?.readOnly,
           federation: health?.federation,
+          ha: health?.ha,
         },
       };
     });
@@ -297,20 +318,61 @@ export class MeshClient {
     );
   }
   async publish(command: Command): Promise<Entry> {
-    await this.session();
-    const event = signEvent(this.key, command);
-    const p = await this.authedRequest("/api/prepare", { event });
-    if (p.entry) return p.entry;
-    let transaction: string | undefined;
-    if (p.transaction) {
-      const tx = Transaction.from(Buffer.from(p.transaction, "base64"));
-      await verifyPreparedTransaction(event, tx, await this.context());
-      tx.partialSign(this.key);
-      transaction = tx
-        .serialize({ requireAllSignatures: false })
-        .toString("base64");
-    }
-    return this.authedRequest("/api/commit", { event, transaction });
+    return this.publishEvent(signEvent(this.key, command));
+  }
+  /** Persist this event in the agent's outbox to retry even after the agent restarts. */
+  async publishEvent(event: Entry["event"]): Promise<Entry> {
+    verifyEvent(event);
+    if (address(event.pubkey) !== this.key.publicKey.toBase58())
+      throw Error("Event signer differs from client identity");
+    const until = Date.now() + (this.options.failoverMs ?? 30000);
+    let failure: any;
+    do {
+      try {
+        return await this.read(async (client, health) => {
+          // Legacy read replicas cannot be promoted by the client.
+          if (health?.readOnly)
+            throw new HttpError(
+              "Replica is read-only; writable failover requires an HA cluster",
+              409
+            );
+          const p = await client.authedRequest("/api/prepare", { event });
+          if (p.entry) return p.entry;
+          let transaction: string | undefined;
+          if (p.transaction) {
+            const tx = Transaction.from(Buffer.from(p.transaction, "base64"));
+            await verifyPreparedTransaction(
+              event,
+              tx,
+              await client.authedRequest("/api/context")
+            );
+            tx.partialSign(this.key);
+            transaction = tx
+              .serialize({ requireAllSignatures: false })
+              .toString("base64");
+          }
+          return client.authedRequest("/api/commit", { event, transaction });
+        });
+      } catch (e) {
+        if (e instanceof HttpError && e.status < 500) throw e;
+        // Signature/instruction verification errors must not be retried as transport failures.
+        if (
+          !(e instanceof HttpError) &&
+          !(e instanceof TypeError) &&
+          !(e instanceof DOMException)
+        )
+          throw e;
+        failure = e;
+        if (Date.now() < until)
+          await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+    } while (Date.now() < until);
+    const error = new Error(
+      "Delivery unconfirmed; retry publishEvent with the same signed event: " +
+        (failure?.message || failure)
+    );
+    Object.assign(error, { event, cause: failure });
+    throw error;
   }
   async watch(
     onEntry: (entry: Entry) => void,

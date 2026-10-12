@@ -14,8 +14,8 @@ The budget ceiling counts cumulative task allocations. Cancelling a task or retu
 2. Client authenticates using a fresh relay challenge. The coordinator validates the signature, scope, policy and revision.
 3. For an on-chain command, the relay builds an unsigned transaction containing the event ID and exact command arguments.
 4. The SDK/browser verifies signed provider offers and owner/agent bindings, then independently reconstructs the expected instruction using the bundled IDL and context. It rejects an extra instruction, changed program, changed account, changed amount or different authority before signing.
-5. The actor signs; the relay checks the original prepared message, adds its fee-payer signature, and persists the signed transaction before sending it.
-6. The relay confirms the transaction and checks the program account's last event ID, then atomically appends the event and chain receipt to SQLite.
+5. The actor signs; the relay checks the original prepared message, adds its fee-payer signature, and persists the signed transaction before sending it. In HA mode, the exact raw transaction and signed event must be committed on two of three journal nodes before broadcast.
+6. The relay confirms the transaction and checks the program account's last event ID, then commits the event and receipt through the same majority before acknowledging success. Each node atomically appends to its local SQLite journal. Standalone mode persists only to its own database.
 7. Subscribers receive the signed event and delivery metadata. Smart clients verify event signatures and refresh authorized context. The indexer upgrades receipt status to finalized.
 
 ## On-chain state
@@ -42,6 +42,8 @@ Read access is evaluated at query and delivery time. Owners/coordinators/reviewe
 - New access: fetch a fresh context snapshot to include earlier dependency data now visible.
 - Process dies before send: pending raw transaction can be resent with the same signature.
 - Process dies after chain confirmation: recover its receipt and append its event on restart before new mutations.
+- HA leader dies: the surviving majority elects a replacement, commits an inherited-prefix barrier, and reconciles the shared pending transaction before accepting new domain commands. SDK/CLI/MCP and the loaded browser reconnect automatically.
+- Network partition: the minority cannot acknowledge new writes or fresh context. An old leader can only rebroadcast a previously committed exact transaction. Rejoining nodes repair their log and event projection.
 - Explicit preflight failure: mark that command failed; never block later commands on its unsent signature.
 - Unknown network outcome: retain the pending command and reconcile before admitting another mutation.
 - Slow subscriber: close it and allow cursor-based replay.
@@ -54,4 +56,4 @@ The localnet scope does not exercise forks. A future public-network release must
 
 The MEP core is deliberately independent of an LLM provider. SDK/MCP tools expose the same state to external agent runtimes. The four-process example is deterministic and verifies API/client schema compatibility; it is an integration fixture, not an assertion of autonomous general-purpose coding quality.
 
-Authorized primary/replica replication and optional client-side encryption are implemented; see [replication and private work](federation-and-privacy.md) for verification, trust boundaries, history retention and key handling. Multi-writer federation/elections, large artifact chunks, reputation, arbitration, recurring contracts and subcontracting budget trees remain separate work.
+Authorized primary/replica replication, fixed-membership HA elections and optional client-side encryption are implemented; see [automatic failover](high-availability.md) and [replication and private work](federation-and-privacy.md). Multiple independent writers, membership changes, consensus log compaction, large artifact chunks, reputation, arbitration, recurring contracts and subcontracting budget trees remain separate work.

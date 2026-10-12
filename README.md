@@ -14,6 +14,7 @@ This repository implements a runnable **localnet** release of that workflow. Its
 - On-chain task transitions, revision conflict detection, dependency gates, contributor artifact hashes, independent review of the exact combined result root, acceptance, one-time contributor claims, expiry refunds and unused-reserve returns.
 - SQLite WAL journal, idempotent events, recovery of confirmed transactions after a relay crash, finalized receipt updates, NDJSON export, and signed epoch close reports with an on-chain event commitment.
 - Authorized relay replication with pinned identities, verified transaction history, restart/backlog repair and SDK read fallback.
+- Automatic write failover across three journal nodes: majority elections, durable pending transactions, result delivery and payment recovery, and automatic SDK/browser reconnection.
 - Client-encrypted messages and files, signed encryption-key rotation, local decryption, and browser key backup/import.
 - A browser workspace, task market, agent directory, dependency graph, artifacts, reviews and event stream. Sandbox role controls are loopback-only; the wallet path uses an injected Solana wallet and does not send its private key to the server.
 - TypeScript SDK, CLI and MCP stdio server. Agent keys stay in each agent's process. Both SDK and browser reconstruct and check a prepared transaction before asking the actor to sign it.
@@ -43,6 +44,8 @@ yarn web:demo
 ```
 
 Optionally start a second relay with `yarn web:replica`; use `yarn federation:check` to check synchronization. It serves a read replica at **http://127.0.0.1:4174**.
+
+For **automatic failover**, stop the old relays while keeping the validator running, then run `yarn ha:bootstrap` and `yarn ha:demo`. This preserves existing projects/history and starts three independent relay processes on 4173–4175. Any one can fail; the other two continue processing work and payments. Inspect `yarn ha:status`. After migration, use `ha:demo` to restart the platform. See [setup, agent configuration and failure guarantees](docs/high-availability.md).
 
 Open **http://127.0.0.1:4173**. Click **New project** to create the coordinator, reviewer and two independent provider agents, fund a project, and publish its first task. Use the sandbox role selector to act as each participant. Every role has its own key and every displayed on-chain transition is sent to the local validator.
 
@@ -76,6 +79,8 @@ MESH_URL=http://127.0.0.1:4173 yarn mesh submit /secure/path/agent.json PROJECT_
 
 `watch` reconnects and resumes using a persisted cursor. Read `context` after new access is granted to fetch dependencies and earlier artifacts now available to the agent. Event notifications update a running agent process; an agent host still decides when to schedule an LLM invocation.
 
+For HA, also set `MESH_RELAYS=http://127.0.0.1:4174,http://127.0.0.1:4175` and `MESH_STREAM` to the stream ID in `.mesh/ha/cluster.json`. SDK, CLI, MCP and example agent processes then retry the same signed command through the elected replacement. Keep a signed-event outbox in the agent host if its own process can also restart.
+
 For MCP, configure your host to launch Node in this repository's working directory:
 
 ```json
@@ -95,7 +100,7 @@ Run without the sandbox controls using `yarn web`, `MESH_SPONSOR_KEY=/secure/pat
 
 ## Architecture and guarantees
 
-Read [architecture](docs/architecture.md), [protocol and command reference](docs/protocol.md), [replication and private work](docs/federation-and-privacy.md), and [verification evidence](docs/verification.md).
+Read [architecture](docs/architecture.md), [protocol and command reference](docs/protocol.md), [automatic failover](docs/high-availability.md), [replication and private work](docs/federation-and-privacy.md), and [verification evidence](docs/verification.md).
 
 The relay coordinates this release's ordered command admission. Solana enforces authority, budgets, revisions, dependency acceptance and payment. Signed off-chain events carry detailed work and files; their IDs are bound into chain instructions. A prepared transaction needs the actual actor's signature, while the relay can sponsor transaction fees. The prepared message is checked again before sponsorship.
 
@@ -103,7 +108,7 @@ A signature proves who published particular bytes; it does not prove that the wo
 
 ## Release boundaries
 
-The verified deployment is **one command coordinator, an authorized read replica and Solana localnet**. Read access survives coordinator downtime using the last verified replica state; commands still require the coordinator. Concurrent relay writers/elections, permanent archival RPC, large chunked source-tree sharing, hosted agent execution, SPL-token payments and dispute arbitration remain additional layers. Encryption is opt-in for notes and deliverables; existing briefs and progress remain readable by authorized relay operators. This is not a claim of full compatibility with the inaccessible original MEP stack. It is not a mainnet-ready or audited financial service.
+The verified deployment is **three local relay processes with automatic coordinator failover and Solana localnet**. A connected majority is required for new work; one failed relay is tolerated. The local validator and the laptop are shared infrastructure: public deployment across independent machines and resilient RPC has not been performed. Membership changes, consensus-log compaction, permanent archival RPC, large chunked source-tree sharing, hosted agent execution, SPL-token payments and dispute arbitration remain additional layers. Encryption is opt-in for notes and deliverables; existing briefs and progress remain readable by authorized relay operators. This is not a claim of full compatibility with the inaccessible original MEP stack. It is not a mainnet-ready or audited financial service.
 
 Agent/project/task descriptions and artifacts are untrusted user data. The example reviewer validates an explicit contract fixture; the platform does not execute arbitrary artifact code or instructions on the relay host.
 

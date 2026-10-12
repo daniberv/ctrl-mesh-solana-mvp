@@ -13,7 +13,9 @@ const client = new MeshClient(
   process.env.MESH_URL || "http://127.0.0.1:4173",
   key,
   {
-    replicas: process.env.MESH_READ_REPLICAS?.split(",").filter(Boolean),
+    replicas: (process.env.MESH_RELAYS || process.env.MESH_READ_REPLICAS)
+      ?.split(",")
+      .filter(Boolean),
     stream: process.env.MESH_STREAM,
     ...(process.env.MESH_ENCRYPTION_KEY
       ? {

@@ -7,7 +7,15 @@ import { Engine } from "./mesh/engine";
 import { createRelay } from "./mesh/relay";
 import { demoControl, localKey } from "./mesh/demo";
 import { Federation } from "./mesh/federation";
+import { ClusterConfig, Consensus } from "./mesh/consensus";
+import { lockDatabase } from "./mesh/process-lock";
 async function main() {
+  const haConfig: ClusterConfig | undefined = process.env.MESH_HA_CONFIG
+    ? JSON.parse(readFileSync(process.env.MESH_HA_CONFIG, "utf8"))
+    : undefined;
+  const haNode = process.env.MESH_HA_NODE || "";
+  if (haConfig && !haConfig.members.some((m) => m.id === haNode))
+    throw Error("Select a configured HA node");
   const demo = process.env.MESH_DEMO === "1",
     port = Number(process.env.PORT || 4173),
     host = process.env.MESH_HOST || "127.0.0.1";
@@ -17,29 +25,55 @@ async function main() {
   if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(rpc))
     throw Error("This release is restricted to a local validator");
   const replica = !!process.env.MESH_UPSTREAM;
+  if (haConfig && replica)
+    throw Error("HA voters cannot also pull a legacy upstream");
   if (replica && demo)
     throw Error("Replica cannot host sandbox signing controls");
   const sponsor = replica
     ? Keypair.generate()
-    : demo
+    : demo && !haConfig
     ? localKey("owner")
     : Keypair.fromSecretKey(
         Uint8Array.from(
           JSON.parse(
             readFileSync(
-              process.env.MESH_SPONSOR_KEY || ".mesh/keys/sponsor.json",
+              process.env.MESH_SPONSOR_KEY ||
+                (haConfig
+                  ? `.mesh/keys/ha-${haNode}-sponsor.json`
+                  : ".mesh/keys/sponsor.json"),
               "utf8"
             )
           )
         )
       );
+  const dbPath =
+    process.env.MESH_DB ||
+    (replica ? ".mesh/replica.sqlite" : ".mesh/events.sqlite");
+  const unlock = haConfig ? lockDatabase(dbPath) : undefined;
+  process.once("exit", () => unlock?.());
   const chain = new Chain(rpc, sponsor),
-    store = new Store(
-      process.env.MESH_DB ||
-        (replica ? ".mesh/replica.sqlite" : ".mesh/events.sqlite")
-    ),
-    engine = new Engine(store, chain, replica);
-  if (!replica) {
+    store = new Store(dbPath),
+    engine = new Engine(store, chain, replica, !!haConfig);
+  if (haConfig) {
+    if (
+      (await chain.connection.getGenesisHash()) !== haConfig.genesis ||
+      chain.program.programId.toBase58() !== haConfig.program
+    )
+      throw Error("HA cluster uses a different Solana network or program");
+    engine.consensus = new Consensus(
+      store,
+      {
+        id: haNode,
+        config: haConfig,
+        token: readFileSync(
+          process.env.MESH_HA_TOKEN_FILE || ".mesh/ha/peer.token",
+          "utf8"
+        ).trim(),
+      },
+      (action) => engine.applyConsensus(action)
+    );
+  }
+  if (!replica && !haConfig) {
     await engine.recover();
     await engine.verifyHeads();
   }
@@ -60,7 +94,9 @@ async function main() {
             JSON.parse(readFileSync(process.env.MESH_RELAY_KEY, "utf8"))
           )
         )
-      : localKey(replica ? "relay-replica" : "relay"),
+      : localKey(
+          haConfig ? `relay-ha-${haNode}` : replica ? "relay-replica" : "relay"
+        ),
     token: replicationToken,
     ...(replica
       ? {
@@ -77,18 +113,29 @@ async function main() {
     port,
     host,
     federation,
-    ...(demo ? { demo: demoControl("http://127.0.0.1:" + port, engine) } : {}),
+    ...(demo
+      ? {
+          demo: demoControl(
+            "http://127.0.0.1:" + port,
+            engine,
+            haConfig?.members.map((m) => m.url)
+          ),
+        }
+      : {}),
   });
   await relay.start();
+  engine.consensus?.start();
   federation.start();
   const subscriptions = new Map<string, number>();
   const subscribe = () => {
     if (replica) return;
+    if (engine.consensus && !engine.consensus.writable) return;
     for (const job of Object.values(engine.state.jobs))
       if (!subscriptions.has(job.id)) {
         const id = chain.connection.onAccountChange(
           new (require("@solana/web3.js").PublicKey)(job.address),
           (info) => {
+            if (engine.consensus && !engine.consensus.writable) return;
             try {
               const data: any = chain.program.coder.accounts.decode(
                 "job",
@@ -108,10 +155,12 @@ async function main() {
       }
   };
   engine.on("event", subscribe);
+  engine.consensus?.on("change", subscribe);
   subscribe();
   let reconciling = false;
   const timer = setInterval(async () => {
     if (replica) return;
+    if (engine.consensus && !engine.consensus.writable) return;
     if (reconciling) return;
     reconciling = true;
     try {
@@ -156,6 +205,7 @@ async function main() {
     if (closing) return;
     closing = true;
     clearInterval(timer);
+    await engine.consensus?.stop();
     await federation.stop();
     await relay.stop();
     await Promise.race([

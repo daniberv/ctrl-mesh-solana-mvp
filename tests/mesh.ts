@@ -5,6 +5,7 @@ import {
   Transaction,
   LAMPORTS_PER_SOL,
   SystemProgram,
+  SYSVAR_CLOCK_PUBKEY,
 } from "@solana/web3.js";
 import { strict as assert } from "assert";
 import bs58 from "bs58";
@@ -556,7 +557,22 @@ describe("multi-owner mesh platform", function () {
     );
     assert.equal(engine.state.jobs[id].state, "working");
     assert.equal(store.pending().length, 0);
-    await new Promise((r) => setTimeout(r, 7000));
+    // Expiry is enforced by the bank clock, which can lag host time under load.
+    const waitUntil = Date.now() + 30000;
+    for (;;) {
+      const clock = await provider.connection.getAccountInfo(
+        SYSVAR_CLOCK_PUBKEY
+      );
+      if (
+        Number(clock!.data.readBigInt64LE(32)) > engine.state.jobs[id].deadline
+      )
+        break;
+      assert(
+        Date.now() < waitUntil,
+        "Validator clock did not reach the task deadline"
+      );
+      await new Promise((r) => setTimeout(r, 250));
+    }
     await command(owner, "job.cancel", { job: id, revision: 1 });
     assert.equal(engine.state.jobs[id].state, "cancelled");
     await command(owner, "job.cancel", { job: "private-work", revision: 0 });

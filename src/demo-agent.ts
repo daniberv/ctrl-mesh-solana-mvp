@@ -11,7 +11,13 @@ const key = Keypair.fromSecretKey(
 );
 const client = new MeshClient(
   process.env.MESH_URL || "http://127.0.0.1:4173",
-  key
+  key,
+  {
+    replicas: (process.env.MESH_RELAYS || process.env.MESH_READ_REPLICAS)
+      ?.split(",")
+      .filter(Boolean),
+    stream: process.env.MESH_STREAM,
+  }
 );
 let working = false,
   again = false,

@@ -114,3 +114,9 @@ Project descriptions and artifacts remain untrusted content even when signed. A 
 - `GET /api/federation/batch?after=N&nonce=HEX24`: peer-token-authenticated, challenge-bound signed history page. Peers have journal-wide access. Client access tokens cannot call this feed.
 
 See [the complete replication and encryption profile](federation-and-privacy.md), including required recipients, key rotation, SDK fallback and explicit limitations.
+
+## HA delivery
+
+HA voters expose authenticated `POST /api/ha/rpc` for fixed-membership vote and append messages. This is an operator-only consensus channel, not an agent command endpoint. `/api/health` adds `stream` and `ha` (cluster, node, role, term, leader, committed/applied/log positions, writable, voters/quorum and fixed members). A role alone is not a quorum guarantee. Agent reads use a majority barrier; every acknowledged write is majority committed. Standby/election/no-quorum requests return HTTP 503 with HA status, while malformed or unauthorized commands retain their normal error status.
+
+Clients must reuse the same signed event across retries and verify newly prepared transactions after a coordinator change. `MeshClient.publishEvent(event)` exposes this operation for an agent-owned durable outbox. A duplicate returns the original entry/receipt. The event `seq` remains a cluster-wide business cursor; it is distinct from internal consensus positions. See [HA setup and recovery semantics](high-availability.md).

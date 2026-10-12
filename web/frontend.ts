@@ -74,18 +74,128 @@ let role = localStorage.getItem("mesh-role") || "owner",
   socket: WebSocket | undefined,
   reconnect: any,
   refreshTimer: any;
-async function api(path: string, data?: any) {
-  const r = await fetch("/api/" + path, {
+let activeRelay = location.origin,
+  cluster = "",
+  stream = "",
+  relayURLs: string[] = [],
+  selecting: Promise<void> | undefined;
+async function nodeRequest(
+  url: string,
+  path: string,
+  data?: any,
+  bearer = token
+) {
+  const r = await fetch(url + "/api/" + path, {
     method: data === undefined ? "GET" : "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(token ? { Authorization: "Bearer " + token } : {}),
+      ...(bearer ? { Authorization: "Bearer " + bearer } : {}),
     },
     body: data === undefined ? undefined : JSON.stringify(data),
+    signal: AbortSignal.timeout(7000),
+    redirect: "error",
   });
   const result = await r.json();
-  if (!r.ok) throw Error(result.error || r.statusText);
+  if (!r.ok)
+    throw Object.assign(Error(result.error || r.statusText), {
+      status: r.status,
+    });
   return result;
+}
+const retryable = (e: any) =>
+  e.status >= 500 || e instanceof TypeError || e instanceof DOMException;
+async function selectRelay() {
+  if (!cluster) return;
+  if (selecting) return selecting;
+  selecting = (async () => {
+    const states = await Promise.all(
+      relayURLs.map(async (url) => {
+        try {
+          return { url, h: await nodeRequest(url, "health", undefined, "") };
+        } catch {
+          return null;
+        }
+      })
+    );
+    const available = states
+      .filter(
+        (s): s is NonNullable<typeof s> =>
+          !!s &&
+          s.h.ha?.cluster === cluster &&
+          s.h.stream === stream &&
+          s.h.ha.writable
+      )
+      .sort((a, b) => b.h.ha.term - a.h.ha.term);
+    if (!available.length)
+      throw Object.assign(Error("Choosing a backup coordinator…"), {
+        status: 503,
+      });
+    const chosen = available[0];
+    const changed = activeRelay !== chosen.url;
+    if (changed) {
+      activeRelay = chosen.url;
+      token = "";
+    }
+    health = chosen.h;
+    if (!token && key) {
+      if (role && demo)
+        token = (
+          await nodeRequest(
+            activeRelay,
+            "demo/run",
+            { action: "session", actor: role },
+            ""
+          )
+        ).token;
+      else if (wallet) {
+        const { nonce } = await nodeRequest(
+          activeRelay,
+          "challenge",
+          undefined,
+          ""
+        );
+        token = (
+          await nodeRequest(
+            activeRelay,
+            "auth",
+            { event: await signed({ action: "auth", nonce }) },
+            ""
+          )
+        ).token;
+      }
+    }
+    if (changed && token) startStream();
+  })();
+  try {
+    await selecting;
+  } finally {
+    selecting = undefined;
+  }
+}
+async function api(path: string, data?: any) {
+  if (selecting) await selecting;
+  try {
+    const result = await nodeRequest(activeRelay, path, data);
+    if (path === "health" && result.ha && !cluster) {
+      cluster = result.ha.cluster;
+      stream = result.stream;
+      relayURLs = result.ha.members.map((m: any) => new URL(m.url).origin);
+      // Allow first load during an election to establish an identity and the
+      // reconnect loop; the app must not remain empty until a manual reload.
+      health = result;
+      await selectRelay().catch(() => {});
+      return health;
+    }
+    return result;
+  } catch (e) {
+    const safe =
+      data === undefined ||
+      (path === "demo/run" &&
+        ["session", "sign", "context"].includes(data.action));
+    if (!cluster || !retryable(e) || !safe) throw e;
+    await selectRelay();
+    return nodeRequest(activeRelay, path, data);
+  }
 }
 function toast(message: string) {
   $("toast").textContent = message;
@@ -142,7 +252,7 @@ function startStream() {
     $("connection").textContent = "Public directory";
     return;
   }
-  socket = new WebSocket(location.origin.replace(/^http/, "ws") + "/wire");
+  socket = new WebSocket(activeRelay.replace(/^http/, "ws") + "/wire");
   socket.onopen = () => {
     socket!.send(JSON.stringify(["AUTH", token]));
     socket!.send(JSON.stringify(["REQ", "live", { after: 0 }]));
@@ -158,7 +268,14 @@ function startStream() {
   socket.onclose = () => {
     $("connection").textContent = "Reconnecting…";
     reconnect = setTimeout(
-      () => authenticate().catch((e) => toast(e.message)),
+      () =>
+        (async () => {
+          await selectRelay();
+          await authenticate();
+        })().catch((e) => {
+          toast(e.message);
+          reconnect = setTimeout(startStream, 1500);
+        }),
       1500
     );
   };
@@ -187,23 +304,45 @@ async function publish(command: any) {
     throw Error(
       "This relay is a read replica. Open the coordinator to publish work."
     );
-  if (role && demo)
-    result = await api("demo/run", { action: "publish", actor: role, command });
-  else {
-    if (!wallet) throw Error("Connect a wallet or select a sandbox role");
-    const event = await signed(command),
-      p = await api("prepare", { event });
-    if (p.entry) return p.entry;
-    let transaction;
-    if (p.transaction) {
-      const tx = Transaction.from(Buffer.from(p.transaction, "base64"));
-      await verifyPreparedTransaction(event, tx, await api("context"));
-      const signedTx = await wallet.signTransaction(tx);
-      transaction = Buffer.from(
-        signedTx.serialize({ requireAllSignatures: false })
-      ).toString("base64");
+  if (!wallet && !(role && demo))
+    throw Error("Connect a wallet or select a sandbox role");
+  const event =
+    role && demo
+      ? (await api("demo/run", { action: "sign", actor: role, command })).event
+      : await signed(command);
+  const until = Date.now() + 30000;
+  for (;;) {
+    try {
+      if (role && demo) {
+        result = await api("demo/run", {
+          action: "publish",
+          actor: role,
+          event,
+        });
+        break;
+      }
+      const p = await api("prepare", { event });
+      if (p.entry) {
+        result = p.entry;
+        break;
+      }
+      let transaction;
+      if (p.transaction) {
+        const tx = Transaction.from(Buffer.from(p.transaction, "base64"));
+        await verifyPreparedTransaction(event, tx, await api("context"));
+        const signedTx = await wallet.signTransaction(tx);
+        transaction = Buffer.from(
+          signedTx.serialize({ requireAllSignatures: false })
+        ).toString("base64");
+      }
+      result = await api("commit", { event, transaction });
+      break;
+    } catch (e) {
+      if (!cluster || !retryable(e) || Date.now() >= until) throw e;
+      $("connection").textContent = "Switching coordinator…";
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      await selectRelay().catch(() => {});
     }
-    result = await api("commit", { event, transaction });
   }
   await refresh();
   toast(
@@ -483,19 +622,31 @@ function render() {
     }</div><p class="tiny muted">Rotation protects future messages. It cannot erase copies or keys already received by others. Keep old keys for your history.</p><p class="hash">${
       record ? escape(JSON.parse(record.content).boxKey) : ""
     }</p></section><section class="panel"><h2>Relay connection</h2>${badge(
-      health.readOnly ? "read replica" : "coordinator"
+      health.ha
+        ? "automatic failover"
+        : health.readOnly
+        ? "read replica"
+        : "coordinator"
     )}<div class="row"><span>Verified events</span><strong>${
       health.events
     }</strong></div><div class="row"><span>${
       health.readOnly ? "Replication lag" : "Pending transactions"
     }</span><strong>${
       health.readOnly ? Number(f.lag || 0) + " events" : health.pending
-    }</strong></div><p class="tiny">Last successful sync: ${escape(
+    }</strong></div>${
+      health.ha
+        ? `<div class="row"><span>Active coordinator</span><strong>${escape(
+            health.ha.node
+          )}</strong></div><div class="row"><span>Agreement required</span><strong>2 of 3 nodes</strong></div><p class="tiny">A backup takes over automatically. Work and pending payments are preserved in the shared journal.</p>`
+        : ""
+    }<p class="tiny">Last successful sync: ${escape(
       f.lastSync || (health.readOnly ? "Waiting for peer" : "Primary journal")
     )}</p>${
       f.error ? `<p class="notice">${escape(f.error)}</p>` : ""
     }<p class="tiny muted">${
-      health.readOnly
+      health.ha
+        ? "Agents reconnect and retry the same signed work automatically. Two connected nodes are required to accept changes."
+        : health.readOnly
         ? "This copy serves context and history. Publish commands through the coordinator. During an outage, it shows the last verified state."
         : "Agent SDKs can use an authorized replica when this relay is unavailable. Replicas preserve the same event cursor."
     }</p><p class="tiny muted">Stream</p><p class="hash">${escape(
@@ -1487,7 +1638,7 @@ async function action(name: string, id: string) {
     );
   }
   if (name === "export") {
-    const res = await fetch("/api/export", {
+    const res = await fetch(activeRelay + "/api/export", {
       headers: { Authorization: "Bearer " + token },
     });
     const blob = await res.blob(),
