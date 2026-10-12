@@ -2,6 +2,13 @@ import { address, Command, Entry, MeshEvent, verifyEvent } from "./events";
 import nacl from "tweetnacl";
 import { PublicKey } from "@solana/web3.js";
 import { verifyWorkPackage } from "../proof";
+import {
+  KeyDirectory,
+  SEALED_FILE,
+  Sealed,
+  validateSealed,
+  verifyKeyRecord,
+} from "./encryption";
 export type Agent = {
   registration: MeshEvent;
   key: string;
@@ -77,10 +84,12 @@ export class State {
   jobs: Record<string, Job> = {};
   offers: Record<string, Offer> = {};
   timeline: Entry[] = [];
+  encryptionKeys: KeyDirectory = {};
   apply(entry: Entry) {
     const c = verifyEvent(entry.event),
       actor = address(entry.event.pubkey),
       r = entry.receipt;
+    if (c.action === "key.publish") this.encryptionKeys[actor] = entry.event;
     if (c.action === "agent.register")
       this.agents[c.agent] = {
         registration: entry.event,
@@ -175,6 +184,7 @@ export class State {
         eventId: entry.event.id,
         package: c.package,
         files: c.files,
+        ...(c.encrypted ? { encrypted: true, event: entry.event } : {}),
       };
     if (c.action === "job.release") delete j.packages[c.worker];
     if (c.action === "job.review")
@@ -191,24 +201,21 @@ export class State {
     }
     this.timeline.push(entry);
   }
-  manager(p: Project, actor: string) {
-    return (
-      actor === p.owner ||
-      (actor === p.manager && Date.now() / 1000 <= p.expires)
-    );
+  manager(p: Project, actor: string, now = Date.now() / 1000) {
+    return actor === p.owner || (actor === p.manager && now <= p.expires);
   }
-  canReadProject(id: string, actor: string) {
+  canReadProject(id: string, actor: string, now = Date.now() / 1000) {
     const p = this.projects[id];
     return (
       !!p &&
       (actor === p.owner ||
         actor === p.reviewer ||
-        (actor === p.manager && Date.now() / 1000 <= p.expires))
+        (actor === p.manager && now <= p.expires))
     );
   }
-  canReadJob(j: Job, actor: string) {
+  canReadJob(j: Job, actor: string, now = Date.now() / 1000) {
     return (
-      this.canReadProject(j.project, actor) ||
+      this.canReadProject(j.project, actor, now) ||
       j.members.some(
         (m) => m.worker === actor || this.agents[m.worker]?.owner === actor
       )
@@ -225,7 +232,12 @@ export class State {
   }
   canRead(entry: Entry, actor: string) {
     const c = JSON.parse(entry.event.content);
-    if (c.action === "agent.register") return true;
+    if (["agent.register", "key.publish"].includes(c.action)) return true;
+    if (
+      c.action === "private.publish" &&
+      !c.sealed.recipients.some((r: any) => r.actor === actor)
+    )
+      return false;
     if (c.action === "offer.publish")
       return (
         address(entry.event.pubkey) === actor ||
@@ -243,6 +255,7 @@ export class State {
     );
     return {
       actor,
+      encryptionKeys: this.encryptionKeys,
       signingProjects: Object.values(this.projects)
         .filter((p) => jobs.some((j) => j.project === p.id))
         .map((p) => ({
@@ -251,6 +264,7 @@ export class State {
           owner: p.owner,
           manager: p.manager,
           reviewer: p.reviewer,
+          expires: p.expires,
           revision: p.revision,
         })),
       projects: Object.values(this.projects)
@@ -287,10 +301,13 @@ export class State {
         })),
     };
   }
-  validate(event: MeshEvent): Command {
+  validate(
+    event: MeshEvent,
+    admissionTime = Math.floor(Date.now() / 1000)
+  ): Command {
     const c = verifyEvent(event),
       actor = address(event.pubkey),
-      now = Math.floor(Date.now() / 1000);
+      now = admissionTime;
     if (Math.abs(event.created_at - now) > 300)
       throw Error("Event timestamp outside admission window");
     const must = (ok: any, msg: string) => {
@@ -299,6 +316,16 @@ export class State {
     const str = (v: any, max = 200) =>
       typeof v === "string" && v.length > 0 && v.length <= max;
     const number = (v: any) => Number.isSafeInteger(v) && v >= 0;
+    if (c.action === "key.publish") {
+      must(
+        !c.project &&
+          !c.job &&
+          c.previous === (this.encryptionKeys[actor]?.id || ""),
+        "Encryption key revision mismatch"
+      );
+      verifyKeyRecord(actor, event);
+      return c;
+    }
     if (c.action === "agent.register") {
       must(
         typeof c.binding === "string" &&
@@ -353,6 +380,55 @@ export class State {
     }
     const p = this.projects[c.project!];
     must(p, "Unknown project");
+    const validateAudience = (sealed: Sealed, purpose: "note" | "artifact") => {
+      validateSealed(sealed);
+      const task = this.jobs[c.job!];
+      const access = (who: string) =>
+        c.job
+          ? !!task &&
+            task.project === p.id &&
+            (this.canReadJob(task, who, now) ||
+              this.canReadDependency(task, who))
+          : this.canReadProject(p.id, who, now);
+      must(
+        sealed.sender === actor &&
+          sealed.project === p.id &&
+          sealed.job === c.job &&
+          sealed.purpose === purpose,
+        "Encrypted scope mismatch"
+      );
+      must(
+        access(actor) && sealed.recipients.some((r) => r.actor === actor),
+        "Sender access required"
+      );
+      for (const r of sealed.recipients) {
+        const record = this.encryptionKeys[r.actor];
+        must(
+          access(r.actor) &&
+            record?.id === r.keyEvent &&
+            verifyKeyRecord(r.actor, record) === r.boxKey,
+          "Recipient access or encryption key changed"
+        );
+      }
+      if (purpose === "artifact") {
+        const required = [
+          p.owner,
+          p.reviewer,
+          ...(now <= p.expires ? [p.manager] : []),
+        ];
+        must(
+          required.every((who) =>
+            sealed.recipients.some((r) => r.actor === who)
+          ),
+          "Encrypted artifacts require owner, reviewer and active coordinator access"
+        );
+      }
+    };
+    if (c.action === "private.publish") {
+      must(!p.closed, "Project epoch is closed");
+      validateAudience(c.sealed, "note");
+      return c;
+    }
     if (c.action === "project.withdraw") {
       must(
         actor === p.owner &&
@@ -390,7 +466,7 @@ export class State {
     }
     must(!p.closed, "Project epoch is closed");
     if (c.action === "job.open") {
-      must(this.manager(p, actor), "Manager permission required");
+      must(this.manager(p, actor, now), "Manager permission required");
       must(
         str(c.job, 80) &&
           !this.jobs[c.job!] &&
@@ -425,7 +501,7 @@ export class State {
       return c;
     }
     if (c.action === "epoch.close") {
-      must(this.manager(p, actor), "Manager required");
+      must(this.manager(p, actor, now), "Manager required");
       const jobs = Object.values(this.jobs).filter((j) => j.project === p.id);
       must(
         jobs.length > 0 &&
@@ -475,7 +551,7 @@ export class State {
     }
     if (c.action === "progress") {
       must(
-        this.canReadJob(j, actor) && str(c.message, 4000),
+        this.canReadJob(j, actor, now) && str(c.message, 4000),
         "Task access required"
       );
       must(!["accepted", "cancelled"].includes(j.state), "Task is closed");
@@ -485,7 +561,10 @@ export class State {
     if (c.action === "job.award") {
       const o = this.offers[c.offerId];
       must(
-        this.manager(p, actor) && o && o.job === j.id && o.project === p.id,
+        this.manager(p, actor, now) &&
+          o &&
+          o.job === j.id &&
+          o.project === p.id,
         "Invalid offer or manager permission"
       );
       must(
@@ -498,6 +577,20 @@ export class State {
       return c;
     }
     if (c.action === "job.submit") {
+      if (c.encrypted !== undefined)
+        must(c.encrypted === true, "Invalid encryption flag");
+      if (c.encrypted) {
+        must(
+          Array.isArray(c.files) &&
+            c.files.length === 1 &&
+            c.files[0].path === SEALED_FILE,
+          "Invalid encrypted artifact container"
+        );
+        validateAudience(
+          JSON.parse(Buffer.from(c.files[0].base64, "base64").toString()),
+          "artifact"
+        );
+      }
       must(
         j.members.some((m) => m.worker === actor),
         "Assigned worker required"
@@ -533,7 +626,7 @@ export class State {
     }
     if (c.action === "job.accept") {
       must(
-        this.manager(p, actor) && c.root === j.root,
+        this.manager(p, actor, now) && c.root === j.root,
         "Manager or version mismatch"
       );
       must(
@@ -570,7 +663,7 @@ export class State {
     if (c.action === "job.release") {
       must(
         j.members.some((m) => m.worker === c.worker) &&
-          (actor === c.worker || this.manager(p, actor)),
+          (actor === c.worker || this.manager(p, actor, now)),
         "Worker or manager required"
       );
       return c;

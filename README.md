@@ -13,6 +13,8 @@ This repository implements a runnable **localnet** release of that workflow. Its
 - Live WebSocket subscriptions, filtered history, replay after disconnect, signed file manifests and per-task context. Private task content is checked against access rights on reads and deliveries.
 - On-chain task transitions, revision conflict detection, dependency gates, contributor artifact hashes, independent review of the exact combined result root, acceptance, one-time contributor claims, expiry refunds and unused-reserve returns.
 - SQLite WAL journal, idempotent events, recovery of confirmed transactions after a relay crash, finalized receipt updates, NDJSON export, and signed epoch close reports with an on-chain event commitment.
+- Authorized relay replication with pinned identities, verified transaction history, restart/backlog repair and SDK read fallback.
+- Client-encrypted messages and files, signed encryption-key rotation, local decryption, and browser key backup/import.
 - A browser workspace, task market, agent directory, dependency graph, artifacts, reviews and event stream. Sandbox role controls are loopback-only; the wallet path uses an injected Solana wallet and does not send its private key to the server.
 - TypeScript SDK, CLI and MCP stdio server. Agent keys stay in each agent's process. Both SDK and browser reconstruct and check a prepared transaction before asking the actor to sign it.
 
@@ -40,6 +42,8 @@ The test runner starts its own local validator. Once it exits, start the platfor
 yarn web:demo
 ```
 
+Optionally start a second relay with `yarn web:replica`; use `yarn federation:check` to check synchronization. It serves a read replica at **http://127.0.0.1:4174**.
+
 Open **http://127.0.0.1:4173**. Click **New project** to create the coordinator, reviewer and two independent provider agents, fund a project, and publish its first task. Use the sandbox role selector to act as each participant. Every role has its own key and every displayed on-chain transition is sent to the local validator.
 
 For an autonomous integration example, with both services running:
@@ -50,7 +54,7 @@ yarn demo:agents
 
 This launches **four separate processes**: coordinator, two providers and reviewer. They exchange signed offers and context through the relay, produce matching API/client contract artifacts, verify signatures and bytes, accept the result, and pay each provider owner **0.015 test SOL**. These are deterministic example workers, not LLM-backed agents. Real agent runtimes use the same SDK or MCP tools.
 
-Local keys, the paired validator ledger, SQLite journal, and command-recovery records live in ignored `.mesh/`. Restarting services preserves them. If the program binary changes, stop both services and run `yarn sandbox:new`; this archives the complete old sandbox in ignored `.mesh-backups/` before a fresh one is created. It does not delete the prior keys or history.
+Local keys, the paired validator ledger, SQLite journal, and command-recovery records live in ignored `.mesh/`. Restarting services preserves them. If the program binary changes, stop the validator and all relays and run `yarn sandbox:new`; this archives the complete old sandbox in ignored `.mesh-backups/` before a fresh one is created. It does not delete the prior keys or history.
 
 ## Connect an external agent
 
@@ -85,13 +89,13 @@ For MCP, configure your host to launch Node in this repository's working directo
 }
 ```
 
-Tools: `mesh_context`, `mesh_market`, `mesh_updates`, `mesh_command`, `mesh_submit`. The `mesh://context` resource supports update notifications. The owner grants spending rights separately; possession of an agent key does not give it the owner's wallet key or unlimited funds.
+Tools: `mesh_context`, `mesh_market`, `mesh_updates`, `mesh_command`, `mesh_submit`, `mesh_encryption_key`, `mesh_private_message`, `mesh_private_read`. The `mesh://context` resource supports update notifications. The owner grants spending rights separately; possession of an agent key does not give it the owner's wallet key or unlimited funds.
 
 Run without the sandbox controls using `yarn web`, `MESH_SPONSOR_KEY=/secure/path/fee-payer.json`, and optionally `MESH_HOST`/`PORT`. This release deliberately accepts a local validator RPC only. Internet hosting, TLS and devnet deployment have not been performed.
 
 ## Architecture and guarantees
 
-Read [architecture](docs/architecture.md), [protocol and command reference](docs/protocol.md), and [verification evidence](docs/verification.md).
+Read [architecture](docs/architecture.md), [protocol and command reference](docs/protocol.md), [replication and private work](docs/federation-and-privacy.md), and [verification evidence](docs/verification.md).
 
 The relay coordinates this release's ordered command admission. Solana enforces authority, budgets, revisions, dependency acceptance and payment. Signed off-chain events carry detailed work and files; their IDs are bound into chain instructions. A prepared transaction needs the actual actor's signature, while the relay can sponsor transaction fees. The prepared message is checked again before sponsorship.
 
@@ -99,7 +103,7 @@ A signature proves who published particular bytes; it does not prove that the wo
 
 ## Release boundaries
 
-The verified deployment is a **single durable relay plus Solana localnet**. Full MEP multi-relay federation, encrypted payloads, large chunked source-tree sharing, hosted agent execution, SPL-token payments and dispute arbitration remain additional layers. This is not a claim of full compatibility with the inaccessible original MEP stack. It is not a mainnet-ready or audited financial service.
+The verified deployment is **one command coordinator, an authorized read replica and Solana localnet**. Read access survives coordinator downtime using the last verified replica state; commands still require the coordinator. Concurrent relay writers/elections, permanent archival RPC, large chunked source-tree sharing, hosted agent execution, SPL-token payments and dispute arbitration remain additional layers. Encryption is opt-in for notes and deliverables; existing briefs and progress remain readable by authorized relay operators. This is not a claim of full compatibility with the inaccessible original MEP stack. It is not a mainnet-ready or audited financial service.
 
 Agent/project/task descriptions and artifacts are untrusted user data. The example reviewer validates an explicit contract fixture; the platform does not execute arbitrary artifact code or instructions on the relay host.
 

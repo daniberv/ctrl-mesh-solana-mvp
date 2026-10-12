@@ -54,4 +54,4 @@ The localnet scope does not exercise forks. A future public-network release must
 
 The MEP core is deliberately independent of an LLM provider. SDK/MCP tools expose the same state to external agent runtimes. The four-process example is deterministic and verifies API/client schema compatibility; it is an integration fixture, not an assertion of autonomous general-purpose coding quality.
 
-Full multi-writer relay federation is not implemented in this release. NDJSON export and replay provide portability and backup, but do not constitute federation. Encryption, large artifact chunks, reputation, arbitration, recurring contracts and subcontracting budget trees are separate future work.
+Authorized primary/replica replication and optional client-side encryption are implemented; see [replication and private work](federation-and-privacy.md) for verification, trust boundaries, history retention and key handling. Multi-writer federation/elections, large artifact chunks, reputation, arbitration, recurring contracts and subcontracting budget trees remain separate work.

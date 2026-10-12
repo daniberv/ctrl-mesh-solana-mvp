@@ -1,3 +1,11 @@
+import nacl from "tweetnacl";
+import {
+  PRIVATE_ALGORITHM,
+  SEALED_FILE,
+  seal,
+  unseal,
+  verifySignedEnvelope,
+} from "../src/mesh/encryption";
 import { verifyPreparedTransaction } from "../src/mesh/transaction";
 import { Transaction, PublicKey } from "@solana/web3.js";
 import { Buffer } from "buffer";
@@ -30,6 +38,8 @@ const sha = async (v: string) =>
     await crypto.subtle.digest("SHA-256", new TextEncoder().encode(v))
   ).toString("hex");
 const kinds: any = {
+  "key.publish": 30002,
+  "private.publish": 30111,
   "project.withdraw": 30041,
   "job.reclaim": 30025,
   "agent.register": 30001,
@@ -52,6 +62,7 @@ let role = localStorage.getItem("mesh-role") || "owner",
   key = "",
   token = "",
   demo = false,
+  health: any = {},
   wallet: any = null,
   actors: any[] = [],
   context: any = { projects: [], jobs: [], agents: [], offers: [] },
@@ -161,6 +172,7 @@ async function refresh() {
     token ? api("events") : Promise.resolve({ entries: [] }),
   ]);
   [market, context] = result;
+  health = await api("health");
   entries = result[2].entries;
   if (
     !context.projects.some((p: any) => p.id === projectId) &&
@@ -171,6 +183,10 @@ async function refresh() {
 }
 async function publish(command: any) {
   let result: any;
+  if (health.readOnly)
+    throw Error(
+      "This relay is a read replica. Open the coordinator to publish work."
+    );
   if (role && demo)
     result = await api("demo/run", { action: "publish", actor: role, command });
   else {
@@ -196,6 +212,75 @@ async function publish(command: any) {
       : "Signed event published"
   );
   return result;
+}
+type BrowserKeys = { active: string; keys: Record<string, string> };
+const keyRing = (): BrowserKeys =>
+  JSON.parse(
+    localStorage.getItem("mesh-encryption-" + key) || '{"active":"","keys":{}}'
+  );
+const saveKeyRing = (ring: BrowserKeys) =>
+  localStorage.setItem("mesh-encryption-" + key, JSON.stringify(ring));
+async function ensureEncryption(rotate = false) {
+  if (!key) throw Error("Connect an identity first");
+  const ring = keyRing(),
+    record = context.encryptionKeys?.[key];
+  if (!rotate && record && !ring.keys[JSON.parse(record.content).boxKey])
+    throw Error(
+      "Import this identity’s encryption key backup, or explicitly rotate in Privacy & network."
+    );
+  if (rotate || !ring.active) {
+    if (Object.keys(ring.keys).length >= 32)
+      throw Error(
+        "Export and archive your key history before another rotation"
+      );
+    const pair = nacl.box.keyPair();
+    ring.active = Buffer.from(pair.publicKey).toString("hex");
+    ring.keys[ring.active] = Buffer.from(pair.secretKey).toString("base64");
+    saveKeyRing(ring);
+  }
+  if (!rotate && record) {
+    ring.active = JSON.parse(record.content).boxKey;
+    saveKeyRing(ring);
+    return;
+  }
+  await publish({
+    action: "key.publish",
+    algorithm: PRIVATE_ALGORITHM,
+    boxKey: ring.active,
+    previous: record?.id || "",
+  });
+}
+function openPrivate(event: any, purpose: "note" | "artifact") {
+  const c = verifySignedEnvelope(event),
+    sender = new PublicKey(Buffer.from(event.pubkey, "hex")).toBase58();
+  if (c.action !== (purpose === "note" ? "private.publish" : "job.submit"))
+    throw Error("Wrong encrypted event type");
+  const envelope =
+    purpose === "note"
+      ? c.sealed
+      : JSON.parse(Buffer.from(c.files[0].base64, "base64").toString());
+  const recipient = envelope.recipients.find((r: any) => r.actor === key),
+    secret = keyRing().keys[recipient?.boxKey];
+  if (!secret)
+    throw Error(
+      "Import the matching encryption key backup to open this record"
+    );
+  return unseal(envelope, key, Buffer.from(secret, "base64"), {
+    sender,
+    project: c.project,
+    job: c.job,
+    purpose,
+  });
+}
+function download(name: string, data: string) {
+  const url = URL.createObjectURL(
+      new Blob([data], { type: "application/json" })
+    ),
+    a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 type Field = {
   name: string;
@@ -343,6 +428,10 @@ function render() {
       b.classList.toggle("active", (b as HTMLElement).dataset.view === view)
     );
   const titles: any = {
+    network: [
+      "Private work. Resilient context.",
+      "Manage your encryption keys and check the relay that holds your shared history.",
+    ],
     workspace: [
       "Build with a larger team.",
       "Your agent manages the project. Independent agents contribute their skills.",
@@ -363,6 +452,7 @@ function render() {
   $("title").textContent = titles[view][0];
   $("subtitle").textContent = titles[view][1];
   $("header-title").textContent = {
+    network: "Privacy & network",
     workspace: "Project overview",
     market: "Task market",
     agents: "Agent directory",
@@ -370,6 +460,52 @@ function render() {
   }[view]!;
   if (selectedJob) {
     renderDetail();
+    return;
+  }
+  if (view === "network") {
+    const f = health.federation || {},
+      record = context.encryptionKeys?.[key];
+    $(
+      "content"
+    ).innerHTML = `<div class="split"><section class="panel"><h2>Private messages & files</h2><p>Your encryption key stays in this browser. Export a backup to keep access to older messages when changing devices.</p><p>${
+      key
+        ? record
+          ? "Encryption identity registered"
+          : "Enable encryption for this identity to receive private work."
+        : "Connect an identity to manage encryption."
+    }</p><div class="actions">${
+      key
+        ? button("encryption-enable", "Enable encryption", "", "primary") +
+          button("encryption-export", "Export key backup") +
+          button("encryption-import", "Import key backup") +
+          button("encryption-rotate", "Rotate encryption key")
+        : ""
+    }</div><p class="tiny muted">Rotation protects future messages. It cannot erase copies or keys already received by others. Keep old keys for your history.</p><p class="hash">${
+      record ? escape(JSON.parse(record.content).boxKey) : ""
+    }</p></section><section class="panel"><h2>Relay connection</h2>${badge(
+      health.readOnly ? "read replica" : "coordinator"
+    )}<div class="row"><span>Verified events</span><strong>${
+      health.events
+    }</strong></div><div class="row"><span>${
+      health.readOnly ? "Replication lag" : "Pending transactions"
+    }</span><strong>${
+      health.readOnly ? Number(f.lag || 0) + " events" : health.pending
+    }</strong></div><p class="tiny">Last successful sync: ${escape(
+      f.lastSync || (health.readOnly ? "Waiting for peer" : "Primary journal")
+    )}</p>${
+      f.error ? `<p class="notice">${escape(f.error)}</p>` : ""
+    }<p class="tiny muted">${
+      health.readOnly
+        ? "This copy serves context and history. Publish commands through the coordinator. During an outage, it shows the last verified state."
+        : "Agent SDKs can use an authorized replica when this relay is unavailable. Replicas preserve the same event cursor."
+    }</p><p class="tiny muted">Stream</p><p class="hash">${escape(
+      f.stream
+    )}</p><p class="tiny muted">Relay identity</p><p class="hash">${escape(
+      f.publicKey
+    )}</p><div class="actions">${button(
+      "network-refresh",
+      "Refresh status"
+    )}</div></section></div>`;
     return;
   }
   if (view === "workspace") {
@@ -542,6 +678,14 @@ function dependencyGraph(jobs: any[]) {
 function renderEvent(e: any) {
   const c = JSON.parse(e.event.content),
     pubkey = new PublicKey(Buffer.from(e.event.pubkey, "hex")).toBase58();
+  let privateText = "";
+  if (c.action === "private.publish") {
+    try {
+      privateText = openPrivate(e.event, "note").message;
+    } catch {
+      privateText = "Encrypted · decryption key unavailable on this device";
+    }
+  }
   return `<div class="event"><span class="seq">#${e.seq}<br>${new Date(
     e.event.created_at * 1000
   ).toLocaleTimeString([], {
@@ -555,7 +699,11 @@ function renderEvent(e: any) {
         escape(context.jobs.find((j: any) => j.id === c.job)?.title || c.job)
       : ""
   }${
-    c.message ? " · " + escape(c.message) : ""
+    privateText
+      ? " · 🔒 " + escape(privateText)
+      : c.message
+      ? " · " + escape(c.message)
+      : ""
   }</p><div class="hash">Event ${escape(short(e.event.id))}${
     e.receipt.signature
       ? ` · <button class="link-button" data-copy="${escape(
@@ -619,7 +767,7 @@ function renderDetail() {
           ? button("release", "Release work", j.id)
           : "")
       : ""
-  }${
+  }${button("private-note", "Private message", j.id)}${
     isReviewer && j.state === "review"
       ? button("approve", "Approve review", j.id, "primary") +
         button("reject", "Request changes", j.id)
@@ -670,7 +818,13 @@ function renderDetail() {
                   : "submitted"
               )}${
                 j.packages[m.worker]
-                  ? button("artifact", "View files", m.worker)
+                  ? button(
+                      "artifact",
+                      j.packages[m.worker].encrypted
+                        ? "Open encrypted files"
+                        : "View files",
+                      m.worker
+                    )
                   : ""
               }</div></div>`
           )
@@ -736,6 +890,119 @@ async function action(name: string, id: string) {
   const job = context.jobs.find((j: any) => j.id === id),
     p = pCurrent(),
     now = Math.floor(Date.now() / 1000);
+  if (name === "network-refresh") return refresh();
+  if (name === "encryption-enable") {
+    await ensureEncryption();
+    toast("Encryption enabled for this identity");
+    return;
+  }
+  if (name === "encryption-rotate")
+    return form(
+      "Rotate encryption key",
+      [],
+      async () => {
+        await ensureEncryption(true);
+        toast("New key published. Old keys remain on this device for history.");
+      },
+      "Rotate for future messages"
+    );
+  if (name === "encryption-export") {
+    const ring = keyRing();
+    if (!ring.active) throw Error("Enable encryption first");
+    download(
+      "mesh-encryption-backup-" + key.slice(0, 8) + ".json",
+      JSON.stringify({ version: 1, actor: key, ...ring }, null, 2)
+    );
+    return;
+  }
+  if (name === "encryption-import") {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json";
+    input.onchange = async () => {
+      try {
+        const file = input.files?.[0];
+        if (!file) return;
+        if (file.size > 20000) throw Error("Key backup too large");
+        const backup = JSON.parse(await file.text());
+        if (
+          backup.version !== 1 ||
+          backup.actor !== key ||
+          !backup.keys ||
+          Object.keys(backup.keys).length > 32
+        )
+          throw Error("Wrong identity or invalid backup");
+        for (const [pub, secret] of Object.entries(backup.keys)) {
+          const pair = nacl.box.keyPair.fromSecretKey(
+            Buffer.from(secret as string, "base64")
+          );
+          if (Buffer.from(pair.publicKey).toString("hex") !== pub)
+            throw Error("Invalid key backup");
+        }
+        if (!backup.keys[backup.active])
+          throw Error("Missing active encryption key");
+        const existing = keyRing();
+        saveKeyRing({
+          active: backup.active,
+          keys: { ...existing.keys, ...backup.keys },
+        });
+        await refresh();
+        toast("Encryption keys restored on this device");
+      } catch (e) {
+        toast((e as Error).message);
+      }
+    };
+    input.click();
+    return;
+  }
+  if (name === "private-note") {
+    await ensureEncryption();
+    const project = [...context.projects, ...context.signingProjects].find(
+      (p: any) => p.id === job.project
+    );
+    const eligible = [
+      ...new Set([
+        project.owner,
+        project.reviewer,
+        ...(project.expires >= now ? [project.manager] : []),
+        ...job.members.flatMap((m: any) => [m.worker, m.recipient]),
+      ]),
+    ].filter((actor: any) => context.encryptionKeys[actor]);
+    return form(
+      "Send an encrypted message",
+      [
+        {
+          name: "recipient",
+          label: "Recipient with a published encryption key",
+          options: eligible.map((actor: any) => ({
+            value: actor,
+            label: agentName(actor),
+          })),
+        },
+        {
+          name: "message",
+          label: "Private message · decrypted only by you and the recipient",
+          type: "textarea",
+        },
+      ],
+      async (v) => {
+        await refresh();
+        const sealed = seal(
+          { message: v.message },
+          { sender: key, project: job.project, job: job.id, purpose: "note" },
+          [v.recipient],
+          context.encryptionKeys
+        );
+        await publish({
+          action: "private.publish",
+          project: job.project,
+          job: job.id,
+          sealed,
+        });
+      },
+      "Encrypt & send"
+    );
+  }
   if (name === "open") {
     selectedJob = id;
     view = "workspace";
@@ -920,6 +1187,17 @@ async function action(name: string, id: string) {
       [
         { name: "path", label: "File name", value: "deliverable.md" },
         {
+          name: "visibility",
+          label: "File privacy",
+          options: [
+            { value: "shared", label: "Task participants · relay can read" },
+            {
+              value: "encrypted",
+              label: "Encrypted · author, owner, reviewer & coordinator",
+            },
+          ],
+        },
+        {
           name: "content",
           label: "Artifact content",
           type: "textarea",
@@ -927,16 +1205,51 @@ async function action(name: string, id: string) {
         },
       ],
       async (v) => {
-        const bytes = new TextEncoder().encode(v.content),
+        let text = v.content,
+          filePath = v.path;
+        if (v.visibility === "encrypted") {
+          await ensureEncryption();
+          const project = [
+            ...context.projects,
+            ...context.signingProjects,
+          ].find((p: any) => p.id === job.project);
+          const envelope = seal(
+            {
+              files: [
+                {
+                  path: v.path,
+                  base64: Buffer.from(v.content).toString("base64"),
+                },
+              ],
+            },
+            {
+              sender: key,
+              project: job.project,
+              job: job.id,
+              purpose: "artifact",
+            },
+            [
+              project.owner,
+              project.reviewer,
+              ...(project.expires >= Date.now() / 1000
+                ? [project.manager]
+                : []),
+            ],
+            context.encryptionKeys
+          );
+          text = JSON.stringify(envelope);
+          filePath = SEALED_FILE;
+        }
+        const bytes = new TextEncoder().encode(text),
           files = [
-            { path: v.path, base64: Buffer.from(bytes).toString("base64") },
+            { path: filePath, base64: Buffer.from(bytes).toString("base64") },
           ];
         let pkg;
         if (!role) {
           const artifacts = [
               {
-                path: v.path,
-                sha256: await sha(v.content),
+                path: filePath,
+                sha256: await sha(text),
                 bytes: bytes.length,
               },
             ],
@@ -966,6 +1279,7 @@ async function action(name: string, id: string) {
           revision: job.revision,
           files,
           ...(pkg ? { package: pkg } : {}),
+          ...(v.visibility === "encrypted" ? { encrypted: true } : {}),
         });
       }
     );
@@ -1036,10 +1350,15 @@ async function action(name: string, id: string) {
   if (name === "artifact") {
     const task = context.jobs.find((j: any) => j.id === selectedJob),
       artifact = task.packages[id];
-    $("dialog-title").textContent = "Signed artifact · " + agentName(id);
+    const files = artifact.encrypted
+      ? openPrivate(artifact.event, "artifact").files
+      : artifact.files;
+    $("dialog-title").textContent =
+      (artifact.encrypted ? "Decrypted locally · " : "Signed artifact · ") +
+      agentName(id);
     $("dialog-error").textContent = "";
     $("dialog-fields").innerHTML =
-      artifact.files
+      files
         .map(
           (f: any) =>
             `<strong>${escape(f.path)}</strong><pre>${escape(
@@ -1250,7 +1569,7 @@ $("wallet").onclick = async () => {
   }
 };
 (async () => {
-  const health = await api("health");
+  health = await api("health");
   demo = health.demo;
   $("sandbox-note").hidden = !demo;
   if (demo) {

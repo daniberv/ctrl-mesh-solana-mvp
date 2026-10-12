@@ -8,7 +8,15 @@ import {
   Transaction,
 } from "@solana/web3.js";
 import { readFileSync } from "fs";
-import { address, digest, MeshEvent, Receipt, verifyEvent } from "./events";
+import {
+  address,
+  canonical,
+  digest,
+  MeshEvent,
+  Receipt,
+  verifyEvent,
+} from "./events";
+import { projectReceipt } from "./projection";
 import { State } from "./state";
 const bn = (v: number) => new anchor.BN(v);
 const pk = (v: string) => new PublicKey(v);
@@ -100,6 +108,67 @@ export class Chain {
     if (c.action === "project.create")
       result.projectAddress = this.projectAddress(actor, c.project!).toBase58();
     return result;
+  }
+  async verifyHistorical(
+    event: MeshEvent,
+    state: State,
+    supplied: Receipt
+  ): Promise<Receipt> {
+    const c = verifyEvent(event);
+    const expected = await buildTransaction(
+      event,
+      state,
+      this.program,
+      this.sponsor.publicKey
+    );
+    if (!expected) {
+      if (Object.keys(supplied).length)
+        throw Error("Unexpected off-chain receipt");
+      return {};
+    }
+    if (!supplied.signature)
+      throw Error("Historical transaction proof required");
+    const firstAvailable = await this.connection.getFirstAvailableBlock();
+    if (typeof supplied.slot === "number" && supplied.slot < firstAvailable)
+      throw Error(
+        "Historical transaction was pruned by RPC; restore an archival ledger before backfill"
+      );
+    const confirmed = await this.receipt(event, supplied.signature);
+    const record = await this.connection.getTransaction(supplied.signature, {
+      commitment: "confirmed",
+    });
+    if (!record || record.meta?.err)
+      throw Error("Historical transaction unavailable");
+    const tx = Transaction.populate(
+      record.transaction.message,
+      record.transaction.signatures
+    );
+    if (!tx.verifySignatures())
+      throw Error("Historical transaction signature invalid");
+    const rebuilt = (await buildTransaction(
+      event,
+      state,
+      this.program,
+      tx.feePayer!
+    ))!;
+    rebuilt.feePayer = tx.feePayer;
+    rebuilt.recentBlockhash = tx.recentBlockhash;
+    if (!rebuilt.serializeMessage().equals(tx.serializeMessage()))
+      throw Error("Historical transaction differs from signed event");
+    if (c.action.startsWith("job.")) {
+      confirmed.jobAddress =
+        state.jobs[c.job!]?.address ||
+        this.jobAddress(state.projects[c.project!].address, c.job!).toBase58();
+    } else {
+      confirmed.projectAddress =
+        confirmed.projectAddress || state.projects[c.project!].address;
+    }
+    const projected = projectReceipt(event, state, confirmed);
+    const { commitment: oldFinality, ...old } = supplied;
+    const { commitment: newFinality, ...actual } = projected;
+    if (canonical(old) !== canonical(actual))
+      throw Error("Historical receipt projection mismatch");
+    return projected;
   }
   async attachState(
     event: MeshEvent,

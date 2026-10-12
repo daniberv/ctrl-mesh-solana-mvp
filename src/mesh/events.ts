@@ -28,6 +28,8 @@ export type Receipt = {
 };
 export type Entry = { seq: number; event: MeshEvent; receipt: Receipt };
 export const kinds: Record<string, number> = {
+  "key.publish": 30002,
+  "private.publish": 30111,
   "project.withdraw": 30041,
   "job.reclaim": 30025,
   "agent.register": 30001,

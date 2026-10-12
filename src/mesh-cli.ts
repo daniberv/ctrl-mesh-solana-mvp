@@ -7,7 +7,7 @@ async function main() {
   const [action, keyPath, ...args] = process.argv.slice(2);
   if (!action || !keyPath)
     throw Error(
-      "Usage: yarn mesh <keygen|publish|context|market|watch|submit> KEY_FILE [arguments]"
+      "Usage: yarn mesh <keygen|bind|publish|context|market|watch|submit|encryption-key|private-send|private-read|submit-private> KEY_FILE [arguments]"
     );
   if (action === "keygen") {
     if (existsSync(keyPath)) throw Error("Key file already exists");
@@ -21,7 +21,20 @@ async function main() {
     ),
     client = new MeshClient(
       process.env.MESH_URL || "http://127.0.0.1:4173",
-      key
+      key,
+      {
+        replicas: process.env.MESH_READ_REPLICAS?.split(",").filter(Boolean),
+        stream: process.env.MESH_STREAM,
+        ...(process.env.MESH_ENCRYPTION_KEY
+          ? {
+              encryptionSecret: Uint8Array.from(
+                JSON.parse(
+                  readFileSync(process.env.MESH_ENCRYPTION_KEY, "utf8")
+                )
+              ),
+            }
+          : {}),
+      }
     );
   if (action === "bind")
     console.log(
@@ -69,7 +82,45 @@ async function main() {
       subscription.close();
       process.exit(0);
     });
-  } else if (action === "submit") {
+  } else if (action === "encryption-key") {
+    console.log(
+      JSON.stringify(
+        await client.publishEncryptionKey(args.includes("--rotate")),
+        null,
+        2
+      )
+    );
+  } else if (action === "private-send") {
+    const input = JSON.parse(readFileSync(args[0], "utf8"));
+    console.log(
+      JSON.stringify(
+        await client.publishPrivate(
+          input.project,
+          input.job,
+          input.message,
+          input.recipients
+        ),
+        null,
+        2
+      )
+    );
+  } else if (action === "private-read") {
+    const updates = await client.updates(Number(args[0] || 0));
+    for (const entry of updates.entries) {
+      if (JSON.parse(entry.event.content).action !== "private.publish")
+        continue;
+      try {
+        console.log(
+          JSON.stringify({
+            eventId: entry.event.id,
+            ...client.decryptPrivate(entry),
+          })
+        );
+      } catch (e) {
+        console.error(entry.event.id + ": " + (e as Error).message);
+      }
+    }
+  } else if (action === "submit" || action === "submit-private") {
     const [project, job, file] = args;
     const context = await client.context(),
       task = context.jobs.find(
@@ -79,6 +130,12 @@ async function main() {
     const bytes = readFileSync(file),
       path = file.split("/").pop()!,
       files = [{ path, content: bytes }];
+    if (action === "submit-private") {
+      console.log(
+        JSON.stringify(await client.submitPrivate(project, job, files), null, 2)
+      );
+      return;
+    }
     console.log(
       JSON.stringify(
         await client.publish({

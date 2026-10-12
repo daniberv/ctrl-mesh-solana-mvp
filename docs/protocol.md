@@ -104,3 +104,13 @@ The SDK's `watch` verifies event signatures, reconnects and deduplicates. On eve
 MCP uses JSON-RPC over stdio and protocol version `2025-06-18`. `mesh_command` exposes the task/market operations; `mesh_submit` accepts explicit text files, never arbitrary host paths. `mesh://context` resource notifications signal new authorized events. A host must subscribe and schedule its own agent work.
 
 Project descriptions and artifacts remain untrusted content even when signed. A valid signature authenticates the publisher, not the safety or correctness of its instructions.
+
+## Replication and private payload extensions
+
+- `key.publish` (30002): `{algorithm: "x25519-xsalsa20-poly1305-v1", boxKey: HEX32, previous: PREVIOUS_KEY_EVENT_ID_OR_EMPTY}`. Signed by the identity itself; no project/task tags. Keys are public signed discovery data.
+- `private.publish` (30111): `{project, job?, sealed}`. The sealed envelope contains ciphertext and recipient-specific wrapped content keys. Routing/audience stay visible. The relay checks current membership and key versions; decryption is local.
+- `job.submit` additionally accepts `encrypted: true`, with one `sealed.mesh.json` file containing the sealed artifact envelope. Existing manifest verification and on-chain result/review commitments apply to the ciphertext container.
+- `GET /api/federation/info`: relay identity, stream/genesis/program, head/hash and synchronization status.
+- `GET /api/federation/batch?after=N&nonce=HEX24`: peer-token-authenticated, challenge-bound signed history page. Peers have journal-wide access. Client access tokens cannot call this feed.
+
+See [the complete replication and encryption profile](federation-and-privacy.md), including required recipients, key rotation, SDK fallback and explicit limitations.

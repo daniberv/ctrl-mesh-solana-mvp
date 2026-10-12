@@ -13,7 +13,9 @@
     "mcp": "ts-node src/mcp-server.ts",
     "demo:agents": "ts-node scripts/demo-multi-agent.ts",
     "sandbox:new": "bash scripts/new-sandbox.sh",
-    "demo:escrow": "ts-node src/demo.ts"
+    "demo:escrow": "ts-node src/demo.ts",
+    "web:replica": "ts-node scripts/start-replica.ts",
+    "federation:check": "ts-node scripts/check-replicas.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.31.1",

@@ -9,8 +9,16 @@ export class Engine extends EventEmitter {
   state = new State();
   private prepared = new Map<string, { message: Buffer; time: number }>();
   private queue: Promise<any> = Promise.resolve();
-  constructor(public store: Store, public chain: Chain) {
+  constructor(
+    public store: Store,
+    public chain: Chain,
+    public readOnly = false
+  ) {
     super();
+    if (!readOnly && store.meta("upstream"))
+      throw Error(
+        "A replicated journal must stay read-only; automatic promotion is disabled"
+      );
     for (const entry of store.entries()) this.state.apply(entry);
   }
   serial<T>(fn: () => Promise<T>): Promise<T> {
@@ -19,6 +27,10 @@ export class Engine extends EventEmitter {
     return result;
   }
   async prepare(event: MeshEvent) {
+    if (this.readOnly)
+      throw Error(
+        "Replica is read-only; publish through the coordinator relay"
+      );
     return this.serial(async () => {
       const prior = this.store.get(event.id);
       if (prior) return { entry: prior };
@@ -40,6 +52,10 @@ export class Engine extends EventEmitter {
     });
   }
   async commit(event: MeshEvent, serialized?: string): Promise<Entry> {
+    if (this.readOnly)
+      throw Error(
+        "Replica is read-only; publish through the coordinator relay"
+      );
     return this.serial(async () => {
       const prior = this.store.get(event.id);
       if (prior) return prior;
@@ -97,11 +113,27 @@ export class Engine extends EventEmitter {
     });
   }
   append(event: MeshEvent, receipt: any) {
+    const prior = this.store.get(event.id);
+    if (prior) return prior;
     const entry = this.store.append(event, receipt);
     this.state.apply(entry);
     this.prepared.delete(event.id);
     this.emit("event", entry);
     return entry;
+  }
+  async importEntry(entry: Entry) {
+    if (!this.readOnly) throw Error("Replication requires a read-only engine");
+    return this.serial(async () => {
+      if (entry.seq !== this.store.head() + 1 || this.store.get(entry.event.id))
+        throw Error("Replication sequence conflict");
+      this.state.validate(entry.event, entry.event.created_at);
+      const receipt = await this.chain.verifyHistorical(
+        entry.event,
+        this.state,
+        entry.receipt
+      );
+      return this.append(entry.event, receipt);
+    });
   }
   async verifyHeads() {
     const heads = new Map<string, Entry>();

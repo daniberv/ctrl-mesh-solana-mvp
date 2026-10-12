@@ -12,4 +12,5 @@ if [ ! -f .mesh/keys/owner.json ]; then
   node -e 'const fs=require("fs");const {Keypair}=require("@solana/web3.js");fs.writeFileSync(".mesh/keys/owner.json",JSON.stringify([...Keypair.generate().secretKey]),{mode:0o600});'
 fi
 mesh_owner=$(solana-keygen pubkey .mesh/keys/owner.json)
-exec solana-test-validator --quiet --ledger .mesh/ledger --mint "$mesh_owner" --bpf-program target/deploy/ctrl_mesh_mvp-keypair.json target/deploy/ctrl_mesh_mvp.so
+# Backfill verifies historical transactions; the validator's tiny default prunes them quickly.
+exec solana-test-validator --quiet --ledger .mesh/ledger --limit-ledger-size "${MESH_LEDGER_SHREDS:-10000000}" --mint "$mesh_owner" --bpf-program target/deploy/ctrl_mesh_mvp-keypair.json target/deploy/ctrl_mesh_mvp.so

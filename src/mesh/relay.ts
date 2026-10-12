@@ -4,13 +4,19 @@ import { randomBytes } from "crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { Engine } from "./engine";
 import { address, Entry, verifyEvent } from "./events";
+import { Federation } from "./federation";
 export type DemoControl = {
   actors: () => any;
   run: (action: string, input: any) => Promise<any>;
 };
 export function createRelay(
   engine: Engine,
-  options: { port: number; host?: string; demo?: DemoControl }
+  options: {
+    port: number;
+    host?: string;
+    demo?: DemoControl;
+    federation?: Federation;
+  }
 ) {
   const rates = new Map<string, { count: number; until: number }>();
   const limit = (actor: string) => {
@@ -54,6 +60,30 @@ export function createRelay(
         return json(res, 403, { error: "Local demo host required" });
       if (req.headers.origin && req.headers.origin !== `http://${host}`)
         return json(res, 403, { error: "Cross-origin requests disabled" });
+      if (
+        path === "/api/federation/info" &&
+        req.method === "GET" &&
+        options.federation
+      )
+        return json(res, 200, options.federation.info());
+      if (
+        path === "/api/federation/batch" &&
+        req.method === "GET" &&
+        options.federation
+      ) {
+        options.federation.authorize(
+          (req.headers.authorization || "").replace(/^Bearer /, "")
+        );
+        const query = new URL(req.url!, "http://localhost").searchParams;
+        return json(
+          res,
+          200,
+          options.federation.page(
+            Number(query.get("after") || 0),
+            query.get("nonce") || ""
+          )
+        );
+      }
       if (path === "/api/challenge" && req.method === "GET") {
         for (const [n, t] of challenges)
           if (t < Date.now()) challenges.delete(n);
@@ -87,6 +117,8 @@ export function createRelay(
           pending: engine.store.pending().length,
           network: "localnet",
           demo: !!options.demo,
+          readOnly: engine.readOnly,
+          federation: options.federation?.info(),
         });
       if (options.demo && path === "/api/demo/actors" && req.method === "GET")
         return json(res, 200, options.demo.actors());
@@ -201,7 +233,10 @@ export function createRelay(
       }
       json(res, 404, { error: "Not found" });
     } catch (error) {
-      json(res, 400, { error: String((error as Error).message || error) });
+      const message = String((error as Error).message || error);
+      json(res, message === "Authentication required" ? 401 : 400, {
+        error: message,
+      });
     }
   });
   const wss = new WebSocketServer({
