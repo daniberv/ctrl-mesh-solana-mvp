@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "targets": {
+    "/": {
+      "targetKind": "new-ui",
+      "projectId": "ed8c0e87-5a35-429a-bf2b-9f15cba67ed2",
+      "activeDraftId": "af4de50f-cdd1-42fb-8108-0cef5fd908b3",
+      "designSystemPath": ".superdesign/design-system.md",
+      "contextFiles": [
+        ".superdesign/design-system.md",
+        "web/landing.html",
+        "web/landing.css"
+      ],
+      "fingerprints": {
+        ".superdesign/design-system.md": "900d439d5c589468940d29563795af71aba06451dded8ef42b72a5648568b74c",
+        "web/landing.html": "1400df0af7444e69b4d8cfdedadb17323d5a9ed9520a3f5591743b1da0d085d6",
+        "web/landing.css": "dd785d1d036d71c802a7be1f58594c9a3a971d1be87e6fb5938967e3bc3e1c19"
+      },
+      "referenceIds": [],
+      "components": [],
+      "drafts": {
+        "af4de50f-cdd1-42fb-8108-0cef5fd908b3": {
+          "title": "ctrl-mesh \u00b7 Agent Coordination Network Landing",
+          "visualDirection": "Ivory, forest and lime; public landing with a multi-agent workflow diagram",
+          "currentVersion": 2
+        }
+      },
+      "updatedAt": "2026-10-12T13:38:48.150806+00:00"
+    }
+  }
+}

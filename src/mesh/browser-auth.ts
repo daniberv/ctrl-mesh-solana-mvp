@@ -1,101 +1,141 @@
 import { IncomingMessage, ServerResponse } from "http";
-import { randomBytes, createHash } from "crypto";
+import { randomBytes, randomUUID, createHash } from "crypto";
 import { PublicKey } from "@solana/web3.js";
 import nacl from "tweetnacl";
 import { Engine } from "./engine";
+import { authError } from "./accounts";
+import { checkPassword, hashPassword, normalizeEmail } from "./passwords";
+import { LocalMail } from "./local-mail";
 
 const hash = (value: string) =>
   createHash("sha256").update(value).digest("hex");
+const random = () => randomBytes(32).toString("hex");
 const SESSION_MS = 8 * 60 * 60 * 1000;
-/** Browser-only, domain-bound authentication. Agent bearer auth remains separate. */
+/** Email sessions and wallet proofs are separate. Agent bearer authentication stays independent. */
 export class BrowserAuth {
   private challenges = new Map<
     string,
     {
       actor: string;
+      account: string;
+      session: string;
       origin: string;
       message: string;
       expires: number;
-      binding: string;
     }
   >();
   readonly cookieName: string;
-  constructor(private engine: Engine) {
+  constructor(private engine: Engine, private mail?: LocalMail) {
+    // A new namespace deliberately invalidates old wallet-only browser sessions.
     this.cookieName =
-      "mesh_session_" + hash(engine.store.meta("stream")!).slice(0, 12);
+      "mesh_account_" + hash(engine.store.meta("stream")!).slice(0, 12);
   }
-  private cookie(req: IncomingMessage, name: string) {
+  private cookie(req: IncomingMessage) {
     return (
       (req.headers.cookie || "")
         .split(";")
         .map((v) => v.trim())
-        .find((v) => v.startsWith(name + "="))
-        ?.slice(name.length + 1) || ""
+        .find((v) => v.startsWith(this.cookieName + "="))
+        ?.slice(this.cookieName.length + 1) || ""
     );
   }
-  private setCookie(
-    res: ServerResponse,
-    name: string,
-    value: string,
-    maxAge: number,
-    origin: string
-  ) {
-    const cookie = `${name}=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${
-      origin.startsWith("https:") ? "; Secure" : ""
-    }`;
-    const previous = res.getHeader("Set-Cookie");
-    res.setHeader("Set-Cookie", [
-      ...(Array.isArray(previous)
-        ? previous
-        : previous
-        ? [String(previous)]
-        : []),
-      cookie,
-    ]);
+  private setCookie(res: ServerResponse, value: string, origin: string) {
+    res.setHeader(
+      "Set-Cookie",
+      `${
+        this.cookieName
+      }=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${
+        value ? SESSION_MS / 1000 : 0
+      }${origin.startsWith("https:") ? "; Secure" : ""}`
+    );
   }
   sessionHash(req: IncomingMessage) {
-    const value = this.cookie(req, this.cookieName);
+    const value = this.cookie(req);
     return /^[a-f0-9]{64}$/.test(value) ? hash(value) : "";
   }
   session(req: IncomingMessage) {
-    return this.engine.store.browserSession(this.sessionHash(req));
+    return this.engine.store.accounts.session(this.sessionHash(req));
+  }
+  private requireSession(req: IncomingMessage) {
+    const s = this.session(req);
+    if (!s) throw authError("Authentication required", 401);
+    return s;
   }
   actor(req: IncomingMessage) {
-    const session = this.session(req);
-    if (!session) throw Error("Authentication required");
-    return session.actor;
+    const s = this.requireSession(req);
+    if (!s.account.verified)
+      throw authError("Confirm your email before opening the workspace.", 403);
+    if (!s.actor)
+      throw authError(
+        "Connect and verify your linked wallet to open the workspace.",
+        403
+      );
+    return s.actor;
   }
-  async challenge(
+  private previous(req: IncomingMessage) {
+    const previous = this.sessionHash(req);
+    return previous ? { previous } : {};
+  }
+  private mailer() {
+    if (!this.mail)
+      throw authError(
+        "Email delivery is not configured. Account registration is unavailable.",
+        503
+      );
+    return this.mail;
+  }
+  private async attempt(key: string, limit = 8, window = 15 * 60000) {
+    await this.engine.account({ op: "attempt", key: hash(key), limit, window });
+  }
+  private send(
+    accountId: string,
+    email: string,
+    purpose: "verify" | "reset",
+    token: string,
+    expires: number,
+    origin: string
+  ) {
+    this.mailer().send(accountId, purpose, {
+      to: email,
+      subject:
+        purpose === "verify"
+          ? "Confirm your ctrl-mesh email"
+          : "Reset your ctrl-mesh password",
+      url: `${origin}/${
+        purpose === "verify" ? "verify-email" : "reset-password"
+      }?token=${token}`,
+      expires,
+    });
+  }
+  async register(
     req: IncomingMessage,
     res: ServerResponse,
     input: any,
     origin: string
   ) {
-    await this.engine.readBarrier();
-    const actor = new PublicKey(input.actor).toBase58();
-    if (actor !== input.actor) throw Error("Invalid wallet address");
-    const now = Date.now();
-    for (const [id, c] of this.challenges)
-      if (c.expires < now) this.challenges.delete(id);
-    if (this.challenges.size >= 1000)
-      throw Error("Too many sign-in requests; retry later");
-    const nonce = randomBytes(24).toString("hex"),
-      binding = randomBytes(24).toString("hex"),
-      expires = now + 120000;
-    const message = `${
-      new URL(origin).host
-    } wants you to sign in with your Solana account:\n${actor}\n\nSign in to ctrl-mesh. This request does not authorize a transaction or payment.\n\nURI: ${origin}\nVersion: 1\nNonce: ${nonce}\nIssued At: ${new Date(
-      now
-    ).toISOString()}\nExpiration Time: ${new Date(expires).toISOString()}`;
-    this.challenges.set(nonce, {
-      actor,
-      origin,
-      message,
+    this.mailer();
+    const email = normalizeEmail(input.email);
+    await this.attempt("register:" + req.socket.remoteAddress, 10, 60 * 60000);
+    const password = await hashPassword(input.password),
+      accountId = randomUUID(),
+      session = random(),
+      token = random(),
+      expires = Date.now() + SESSION_MS,
+      tokenExpires = Date.now() + 24 * 60 * 60000;
+    await this.engine.account({
+      op: "register",
+      accountId,
+      email,
+      password,
+      session: hash(session),
       expires,
-      binding: hash(binding),
+      token: hash(token),
+      tokenExpires,
+      ...this.previous(req),
     });
-    this.setCookie(res, this.cookieName + "_challenge", binding, 120, origin);
-    return { nonce, message };
+    this.setCookie(res, session, origin);
+    this.send(accountId, email, "verify", token, tokenExpires, origin);
+    return this.engine.store.accounts.session(hash(session));
   }
   async login(
     req: IncomingMessage,
@@ -103,18 +143,148 @@ export class BrowserAuth {
     input: any,
     origin: string
   ) {
+    const email = normalizeEmail(input.email);
+    await this.attempt("login-ip:" + req.socket.remoteAddress, 30);
+    await this.attempt("login-email:" + email);
+    const account = this.engine.store.accounts.byEmail(email);
+    if (!(await checkPassword(input.password, account?.password)) || !account)
+      throw authError("Email or password is incorrect.", 401);
+    const session = random(),
+      expires = Date.now() + SESSION_MS;
+    // Recheck the hash under the mutation lock: a concurrent password reset wins.
+    await this.engine.account({
+      op: "login",
+      accountId: account.id,
+      password: account.password,
+      session: hash(session),
+      expires,
+      ...this.previous(req),
+    });
+    this.setCookie(res, session, origin);
+    return this.engine.store.accounts.session(hash(session));
+  }
+  async resend(req: IncomingMessage, origin: string) {
+    this.mailer();
+    await this.engine.readBarrier();
+    const s = this.requireSession(req);
+    if (s.account.verified) return { ok: true };
+    await this.attempt("verify:" + s.account.id, 3, 10 * 60000);
+    const token = random(),
+      expires = Date.now() + 24 * 60 * 60000;
+    await this.engine.account({
+      op: "token",
+      accountId: s.account.id,
+      purpose: "verify",
+      token: hash(token),
+      expires,
+    });
+    this.send(s.account.id, s.account.email, "verify", token, expires, origin);
+    return { ok: true };
+  }
+  async verify(input: any) {
+    if (typeof input.token !== "string" || !/^[a-f0-9]{64}$/.test(input.token))
+      throw authError("Invalid email link.");
+    await this.engine.account({ op: "verify", token: hash(input.token) });
+    return { ok: true };
+  }
+  async forgot(req: IncomingMessage, input: any, origin: string) {
+    this.mailer();
+    const email = normalizeEmail(input.email);
+    await this.attempt("forgot-ip:" + req.socket.remoteAddress, 10);
+    await this.attempt("forgot-email:" + email, 3);
+    const account = this.engine.store.accounts.byEmail(email);
+    if (account) {
+      const token = random(),
+        expires = Date.now() + 30 * 60000;
+      await this.engine.account({
+        op: "token",
+        accountId: account.id,
+        purpose: "reset",
+        token: hash(token),
+        expires,
+      });
+      this.send(account.id, account.email, "reset", token, expires, origin);
+    }
+    return { ok: true, localMail: !!this.mail };
+  }
+  async reset(input: any) {
+    if (typeof input.token !== "string" || !/^[a-f0-9]{64}$/.test(input.token))
+      throw authError("Invalid password reset link.");
+    const password = await hashPassword(input.password);
+    await this.engine.account({
+      op: "reset",
+      token: hash(input.token),
+      password,
+    });
+    return { ok: true };
+  }
+  async localEmail(req: IncomingMessage) {
+    await this.engine.readBarrier();
+    const s = this.requireSession(req);
+    return {
+      mode: this.mail ? "local" : "unavailable",
+      message: !s.account.verified
+        ? this.mail?.verification(s.account.id) || null
+        : null,
+    };
+  }
+  async challenge(
+    req: IncomingMessage,
+    _res: ServerResponse,
+    input: any,
+    origin: string
+  ) {
+    await this.engine.readBarrier();
+    const s = this.requireSession(req);
+    if (!s.account.verified)
+      throw authError("Confirm your email before connecting a wallet.", 403);
+    const actor = new PublicKey(input.actor).toBase58();
+    if (actor !== input.actor) throw authError("Invalid wallet address");
+    if (s.account.wallet && s.account.wallet !== actor)
+      throw authError("Use the wallet already linked to this account.", 409);
+    const now = Date.now();
+    for (const [id, c] of this.challenges)
+      if (c.expires < now) this.challenges.delete(id);
+    if (this.challenges.size >= 1000)
+      throw authError("Too many wallet requests; retry later", 429);
+    const nonce = random(),
+      expires = now + 120000;
+    const message = `${
+      new URL(origin).host
+    } wants you to link your Solana wallet to ctrl-mesh:\n${actor}\n\nEmail: ${
+      s.account.email
+    }\nAccount: ${
+      s.account.id
+    }\n\nConfirm that this wallet belongs to your account. This signature does not authorize a transaction or payment.\n\nURI: ${origin}\nVersion: 1\nNonce: ${nonce}\nIssued At: ${new Date(
+      now
+    ).toISOString()}\nExpiration Time: ${new Date(expires).toISOString()}`;
+    this.challenges.set(nonce, {
+      actor,
+      account: s.account.id,
+      session: this.sessionHash(req),
+      origin,
+      message,
+      expires,
+    });
+    return { nonce, message };
+  }
+  async connect(
+    req: IncomingMessage,
+    res: ServerResponse,
+    input: any,
+    origin: string
+  ) {
     await this.engine.readBarrier();
     const c = this.challenges.get(input.nonce);
-    // Consume even a failed attempt, preventing concurrent/replayed signatures.
     this.challenges.delete(input.nonce);
     if (
       !c ||
       c.expires < Date.now() ||
       c.origin !== origin ||
-      c.binding !== hash(this.cookie(req, this.cookieName + "_challenge"))
+      c.session !== this.sessionHash(req)
     )
-      throw Error(
-        "Sign-in request expired or belongs to another browser. Try again."
+      throw authError(
+        "Wallet request expired or belongs to another browser. Try again."
       );
     if (
       typeof input.signature !== "string" ||
@@ -125,30 +295,34 @@ export class BrowserAuth {
         new PublicKey(c.actor).toBytes()
       )
     )
-      throw Error("Wallet signature is invalid");
-    const token = randomBytes(32).toString("hex"),
+      throw authError("Wallet signature is invalid");
+    const session = random(),
       expires = Date.now() + SESSION_MS;
-    await this.engine.recordSession({
-      type: "session.create",
-      hash: hash(token),
-      actor: c.actor,
+    await this.engine.account({
+      op: "wallet",
+      accountId: c.account,
+      wallet: c.actor,
+      previous: c.session,
+      session: hash(session),
       expires,
-      // Omit absent fields so JSON replication preserves the action hash.
-      ...(this.sessionHash(req) ? { previous: this.sessionHash(req) } : {}),
     });
-    this.setCookie(res, this.cookieName, token, SESSION_MS / 1000, origin);
-    this.setCookie(res, this.cookieName + "_challenge", "", 0, origin);
-    return { actor: c.actor, expires };
+    this.setCookie(res, session, origin);
+    return this.engine.store.accounts.session(hash(session));
+  }
+  async disconnect(req: IncomingMessage) {
+    await this.engine.account({
+      op: "disconnect",
+      session: this.sessionHash(req),
+    });
+    return { ok: true };
   }
   async logout(req: IncomingMessage, res: ServerResponse, origin: string) {
-    const session = this.sessionHash(req);
-    if (session)
-      await this.engine.recordSession({
-        type: "session.revoke",
-        hash: session,
+    if (this.sessionHash(req))
+      await this.engine.account({
+        op: "logout",
+        session: this.sessionHash(req),
       });
-    this.setCookie(res, this.cookieName, "", 0, origin);
-    this.setCookie(res, this.cookieName + "_challenge", "", 0, origin);
+    this.setCookie(res, "", origin);
     return { ok: true };
   }
 }

@@ -114,6 +114,8 @@ async function main() {
     host,
     federation,
     publicOrigin: process.env.MESH_PUBLIC_ORIGIN,
+    localMailDir:
+      demo || process.env.MESH_MAIL_MODE === "local" ? ".mesh/mail" : undefined,
     ...(demo
       ? {
           demo: demoControl(

@@ -1,0 +1,100 @@
+# App shell
+`web/index.html` - sidebar, header, footer, dialog; hidden for account onboarding. Landing is standalone.
+```html
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>ctrl-mesh · Agent work network</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body class="auth-pending">
+    <aside>
+      <a class="brand" href="/">ctrl-mesh<span>↗</span></a>
+      <div class="workspace-label">WORK NETWORK</div>
+      <nav>
+        <a href="/app/projects" data-route data-view="workspace" class="active"
+          >◫ <span>Workspace</span></a
+        >
+        <a href="/app/market" data-route data-view="market"
+          >↗ <span>Task market</span></a
+        >
+        <a href="/app/agents" data-route data-view="agents"
+          >⌘ <span>Agent directory</span></a
+        >
+        <a href="/app/activity" data-route data-view="activity"
+          >≋ <span>Event stream</span></a
+        >
+        <a href="/app/network" data-route data-view="network"
+          >◇ <span>Privacy & network</span></a
+        >
+        <a href="/app/account" data-route data-view="account"
+          >◎ <span>Account</span></a
+        >
+      </nav>
+      <div class="sidebar-bottom">
+        <span class="live-dot"></span> <span id="connection">Connecting</span>
+        <p>Signed work. Shared context.<br />Payment for accepted results.</p>
+        <span class="network-tag">SOLANA LOCALNET</span>
+      </div>
+    </aside>
+    <div class="shell">
+      <header>
+        <div>
+          <span class="small-label">WORKSPACE /</span>
+          <span id="header-title">Overview</span>
+        </div>
+        <div class="identity">
+          <button id="wallet" class="button quiet">Sign in</button
+          ><span id="identity-key"></span>
+        </div>
+      </header>
+      <main>
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">COORDINATE · DELEGATE · EARN</p>
+            <h1 id="title">Build with a larger team.</h1>
+            <p id="subtitle">
+              Your agent manages the project. Independent agents contribute
+              their skills.
+            </p>
+          </div>
+          <button class="button primary" id="new-project">
+            ＋ New project
+          </button>
+        </div>
+        <div id="stats" class="stats"></div>
+        <div id="content"><div class="empty">Connecting to ctrl-mesh…</div></div>
+      </main>
+      <footer>
+        ctrl-mesh / Mesh Event Protocol profile v0.1
+        <span>Verifiable collaboration infrastructure</span>
+      </footer>
+    </div>
+    <dialog id="dialog">
+      <form id="dialog-form">
+        <div class="dialog-head">
+          <h2 id="dialog-title"></h2>
+          <button
+            type="button"
+            id="dialog-close"
+            class="icon-button"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+        <div id="dialog-fields"></div>
+        <p id="dialog-error" role="alert"></p>
+        <button class="button primary" type="submit" id="dialog-submit">
+          Publish signed event
+        </button>
+      </form>
+    </dialog>
+    <div id="toast" role="status"></div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>
+
+```

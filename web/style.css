@@ -844,3 +844,211 @@ textarea:focus-visible {
   stroke: #435f2d;
   stroke-width: 2;
 }
+
+/* Account entry is separate from the workspace navigation. */
+.auth-page aside,
+.auth-page .shell > header,
+.auth-page .page-heading,
+.auth-page #stats,
+.auth-page .shell > footer,
+.auth-pending aside,
+.auth-pending .shell > header,
+.auth-pending .page-heading,
+.auth-pending #stats,
+.auth-pending .shell > footer {
+  display: none !important;
+}
+.auth-page .shell,
+.auth-pending .shell {
+  margin-left: 0;
+  min-height: 100vh;
+}
+.auth-page main {
+  max-width: none;
+  padding: 38px 24px 55px;
+}
+.auth-shell {
+  width: 100%;
+  max-width: 480px;
+  margin: 0 auto;
+}
+.auth-brand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 25px;
+  text-decoration: none;
+  font-size: 29px;
+  font-weight: 800;
+  letter-spacing: -1.4px;
+  margin: 12px 0 39px;
+}
+.auth-brand span {
+  font-weight: 500;
+  color: #608b29;
+}
+.auth-progress {
+  display: flex;
+  justify-content: space-between;
+  gap: 15px;
+  margin: 0 10px 22px;
+  font-size: 10px;
+  letter-spacing: 0.6px;
+  color: #7b8472;
+}
+.auth-progress .current {
+  color: #385822;
+  font-weight: 700;
+}
+.auth-card {
+  padding: 33px 32px;
+  border: 1px solid var(--line);
+}
+.auth-card h1 {
+  font-size: 29px;
+  line-height: 1.2;
+  letter-spacing: -1px;
+  margin: 0 0 17px;
+}
+.auth-intro {
+  font-size: 13px;
+  line-height: 1.8;
+  color: #616b55;
+  margin: 0 0 26px;
+}
+.auth-card p {
+  line-height: 1.75;
+}
+.auth-card fieldset {
+  padding: 0;
+  border: 0;
+  margin: 0;
+  min-width: 0;
+}
+.auth-card label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  margin: 20px 0 9px;
+}
+.auth-card input {
+  width: 100%;
+  border: 1px solid #cdd4c3;
+  border-radius: 5px;
+  padding: 13px 12px;
+  background: #fff;
+  font-size: 14px;
+  min-width: 0;
+  color: var(--ink);
+}
+.auth-card input:focus {
+  outline: 2px solid #8ea663;
+  outline-offset: 1px;
+}
+.password-field {
+  position: relative;
+}
+.password-field input {
+  padding-right: 65px;
+}
+.password-field button {
+  position: absolute;
+  right: 4px;
+  top: 4px;
+  bottom: 4px;
+  border: 0;
+  background: transparent;
+  font-size: 11px;
+  padding: 0 12px;
+  color: #566b40;
+}
+.auth-card .field-hint {
+  font-size: 10px;
+  color: #747b6b;
+  line-height: 1.7;
+  margin: 9px 0 0;
+}
+.auth-card #auth-form .primary {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  margin-top: 20px;
+  padding: 14px 18px;
+  background: var(--dark);
+  color: white;
+}
+.auth-card .auth-text-link {
+  font-size: 12px;
+  color: #456830;
+}
+#auth-form > .auth-text-link,
+#auth-form fieldset > .auth-text-link {
+  display: block;
+  margin-top: 17px;
+  text-align: right;
+}
+.auth-card #auth-error {
+  font-size: 12px;
+  line-height: 1.6;
+  min-height: 0;
+  overflow-wrap: anywhere;
+}
+.auth-bottom {
+  font-size: 12px;
+  border-top: 1px solid var(--line);
+  margin-top: 27px;
+  padding-top: 22px;
+  text-align: center;
+}
+.auth-footer {
+  text-align: center;
+  font-size: 10px;
+  line-height: 1.7;
+  color: #707967;
+  margin-top: 25px;
+}
+.local-mail {
+  padding: 16px;
+  background: #f0f5e8;
+  border: 1px solid #dae4cc;
+  border-radius: 5px;
+  margin: 17px 0;
+}
+.local-mail p {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.local-mail h3 {
+  font-size: 15px;
+}
+.local-mail .button {
+  font-size: 12px;
+}
+.linked-address {
+  padding: 15px;
+  background: #f4f6ee;
+  border-radius: 5px;
+}
+.auth-card .auth-actions .button {
+  justify-content: center;
+}
+@media (max-width: 540px) {
+  .auth-page main {
+    padding: 20px 16px 35px;
+  }
+  .auth-card {
+    padding: 27px 23px;
+  }
+  .auth-card h1 {
+    font-size: 27px;
+  }
+  .auth-brand {
+    margin: 12px 0 30px;
+  }
+  .auth-progress {
+    font-size: 9px;
+  }
+  .auth-card input {
+    font-size: 16px;
+  }
+}

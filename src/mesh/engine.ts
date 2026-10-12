@@ -7,6 +7,8 @@ import { State } from "./state";
 import { Store } from "./store";
 import { Action, Consensus, Unavailable } from "./consensus";
 import { verifyEvent } from "./events";
+import { randomUUID } from "crypto";
+import { AccountAction, AccountCommand } from "./accounts";
 export class Engine extends EventEmitter {
   state = new State();
   consensus?: Consensus;
@@ -39,6 +41,11 @@ export class Engine extends EventEmitter {
   /** Only committed consensus actions reach the application journal or outbox. */
   applyConsensus(action: Action) {
     if (action.type === "barrier") return;
+    if (action.type === "account") {
+      for (const hash of this.store.accounts.apply(action))
+        this.emit("session.revoked", hash);
+      return;
+    }
     if (action.type === "session.create") {
       this.store.saveBrowserSession(
         action.hash,
@@ -77,6 +84,21 @@ export class Engine extends EventEmitter {
   }
   async readBarrier() {
     await this.consensus?.barrier();
+  }
+  async account(command: AccountCommand) {
+    if (this.readOnly) throw Error("Sign in through the coordinator relay");
+    return this.serial(async () => {
+      const term = await this.consensus?.barrier();
+      const action: AccountAction = {
+        type: "account",
+        id: randomUUID(),
+        now: Date.now(),
+        command,
+      };
+      this.store.accounts.validate(action);
+      if (this.consensus) await this.consensus.propose(action, term);
+      else this.applyConsensus(action);
+    });
   }
   async recordSession(
     action: Extract<Action, { type: "session.create" | "session.revoke" }>

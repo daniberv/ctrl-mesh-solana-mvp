@@ -5,8 +5,9 @@ import { WebSocketServer, WebSocket } from "ws";
 import { Engine } from "./engine";
 import { address, Entry, verifyEvent } from "./events";
 import { Federation } from "./federation";
-import { parseRoute } from "../routes";
+import { legacyRoute, parseRoute } from "../routes";
 import { BrowserAuth } from "./browser-auth";
+import { LocalMail } from "./local-mail";
 export type DemoControl = {
   actors: () => any;
   run: (action: string, input: any) => Promise<any>;
@@ -19,6 +20,7 @@ export function createRelay(
     demo?: DemoControl;
     federation?: Federation;
     publicOrigin?: string;
+    localMailDir?: string;
   }
 ) {
   const rates = new Map<string, { count: number; until: number }>();
@@ -30,9 +32,19 @@ export function createRelay(
     rates.set(actor, bucket);
   };
   const challenges = new Map<string, number>();
-  const browserAuth = new BrowserAuth(engine);
+  if (
+    options.localMailDir &&
+    options.host &&
+    !["127.0.0.1", "localhost"].includes(options.host)
+  )
+    throw Error("Local email preview requires a loopback server");
+  const browserAuth = new BrowserAuth(
+    engine,
+    options.localMailDir ? new LocalMail(options.localMailDir) : undefined
+  );
   const allowedOrigins = (req: IncomingMessage) => [
-    options.publicOrigin || `http://${req.headers.host}`,
+    options.publicOrigin ||
+      `http://${options.host || "127.0.0.1"}:${options.port}`,
     ...(engine.consensus?.options.config.members.map(
       (m) => new URL(m.url).origin
     ) || []),
@@ -103,12 +115,39 @@ export function createRelay(
         return json(res, 403, { error: "Cross-origin requests disabled" });
       if (path === "/api/session" && req.method === "GET") {
         await engine.readBarrier();
-        return json(res, 200, { session: browserAuth.session(req) || null });
+        return json(res, 200, {
+          session: browserAuth.session(req) || null,
+          localMail: !!options.localMailDir,
+        });
       }
+      if (path === "/api/session/local-email" && req.method === "GET")
+        return json(res, 200, await browserAuth.localEmail(req));
       if (path.startsWith("/api/session/") && req.method === "POST") {
         const origin = browserOrigin(req);
         limit("login:" + req.socket.remoteAddress);
         const input = await body(req, 4096);
+        if (path === "/api/session/register")
+          return json(
+            res,
+            200,
+            await browserAuth.register(req, res, input, origin)
+          );
+        if (path === "/api/session/verify")
+          return json(res, 200, await browserAuth.verify(input));
+        if (path === "/api/session/resend")
+          return json(res, 200, await browserAuth.resend(req, origin));
+        if (path === "/api/session/forgot")
+          return json(res, 200, await browserAuth.forgot(req, input, origin));
+        if (path === "/api/session/reset")
+          return json(res, 200, await browserAuth.reset(input));
+        if (path === "/api/session/connect")
+          return json(
+            res,
+            200,
+            await browserAuth.connect(req, res, input, origin)
+          );
+        if (path === "/api/session/disconnect")
+          return json(res, 200, await browserAuth.disconnect(req));
         if (path === "/api/session/challenge")
           return json(
             res,
@@ -293,8 +332,17 @@ export function createRelay(
         }
         return json(res, 404, { error: "Not found" });
       }
+      const legacy = legacyRoute(path);
+      if (legacy && (req.method === "GET" || req.method === "HEAD")) {
+        res.writeHead(308, {
+          Location: legacy + new URL(req.url!, "http://localhost").search,
+        });
+        res.end();
+        return;
+      }
       const files: Record<string, [string, string]> = {
-        "/": ["web/index.html", "text/html"],
+        "/": ["web/landing.html", "text/html"],
+        "/landing.css": ["web/landing.css", "text/css"],
         "/style.css": ["web/style.css", "text/css"],
         "/app.js": ["web/app.js", "text/javascript"],
       };
@@ -315,7 +363,9 @@ export function createRelay(
         const [file, mime] = asset;
         res.writeHead(missingPage ? 404 : 200, {
           "Content-Type": mime + "; charset=utf-8",
-          "Cache-Control": "no-cache",
+          "Cache-Control": "no-store",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
           "Content-Security-Policy":
             "default-src 'self'; connect-src 'self' ws://127.0.0.1:* ws://localhost:* " +
             peerOrigins

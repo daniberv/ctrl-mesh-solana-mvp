@@ -4,6 +4,7 @@ import { dirname } from "path";
 import { Entry, MeshEvent, Receipt } from "./events";
 import { canonical, digest } from "./events";
 import { randomUUID } from "crypto";
+import { Accounts } from "./accounts";
 export const EMPTY_HASH = "0".repeat(64);
 // Finality may advance without changing the immutable journal identity.
 export function journalHash(previous: string, entry: Entry) {
@@ -12,6 +13,7 @@ export function journalHash(previous: string, entry: Entry) {
 }
 export class Store {
   db: DatabaseSync;
+  accounts: Accounts;
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
@@ -23,6 +25,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS journal(seq INTEGER PRIMARY KEY,hash TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS browser_sessions(hash TEXT PRIMARY KEY,actor TEXT NOT NULL,expires INTEGER NOT NULL,revoked INTEGER NOT NULL DEFAULT 0);
     `);
+    this.accounts = new Accounts(this.db);
     if (!this.meta("stream")) this.setMeta("stream", randomUUID());
     // Backfill existing journals without changing events or their sequence numbers.
     try {

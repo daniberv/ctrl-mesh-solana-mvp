@@ -92,7 +92,10 @@ describe("automatic writable failover", function () {
       (action) => engine.applyConsensus(action)
     );
     engine.consensus = raft;
-    const relay = createRelay(engine, { port: 4211 + i });
+    const relay = createRelay(engine, {
+      port: 4211 + i,
+      localMailDir: join(directory, "mail"),
+    });
     nodes[i] = { store, engine, raft, relay, alive: true };
     await relay.start();
     raft.start();
@@ -433,22 +436,39 @@ describe("automatic writable failover", function () {
         },
         body: input === undefined ? undefined : JSON.stringify(input),
       });
-    const challenge = await request("session/challenge", {
-      actor: owner.publicKey.toBase58(),
+    const registration = await request("session/register", {
+      email: "ha@example.test",
+      password: "durable email wallet passphrase",
     });
-    const c = await challenge.json();
-    const login = await request(
-      "session/login",
+    assert.equal(registration.status, 200);
+    let cookie = registration.headers.getSetCookie()[0].split(";")[0];
+    const preview = await (
+      await request("session/local-email", undefined, cookie)
+    ).json();
+    const token = new URL(preview.message.url).searchParams.get("token");
+    assert.equal(
+      (await request("session/verify", { token }, cookie)).status,
+      200
+    );
+    const c = await (
+      await request(
+        "session/challenge",
+        { actor: owner.publicKey.toBase58() },
+        cookie
+      )
+    ).json();
+    const connected = await request(
+      "session/connect",
       {
         nonce: c.nonce,
         signature: Buffer.from(
           nacl.sign.detached(Buffer.from(c.message), owner.secretKey)
         ).toString("hex"),
       },
-      challenge.headers.getSetCookie()[0].split(";")[0]
+      cookie
     );
-    assert.equal(login.status, 200);
-    const cookie = login.headers.getSetCookie()[0].split(";")[0];
+    assert.equal(connected.status, 200);
+    cookie = connected.headers.getSetCookie()[0].split(";")[0];
     const first = index();
     await stop(first);
     await until(() => !!leader(), "No replacement for browser session");
@@ -460,8 +480,18 @@ describe("automatic writable failover", function () {
         .actor,
       owner.publicKey.toBase58()
     );
+    assert.equal(
+      (await (await request("session", undefined, cookie)).json()).session
+        .account.email,
+      "ha@example.test"
+    );
     await start(first);
     await sync();
+    for (const n of live())
+      assert.equal(
+        n.store.accounts.byEmail("ha@example.test")!.wallet,
+        owner.publicKey.toBase58()
+      );
     assert.equal((await request("session/logout", {}, cookie)).status, 200);
     const second = index();
     await stop(second);

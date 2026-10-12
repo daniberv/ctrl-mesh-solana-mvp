@@ -1,6 +1,14 @@
 # Verification record
 
-Latest local verification: **31 test cases verified** on October 12, 2026. The full regression run passed 30 cases and exposed a session replication serialization error; after fixing it, all six failover cases passed, including the new browser-session case. TypeScript checks and browser bundle build also passed.
+Latest local verification: **36 test cases passed** on October 12, 2026, in one full run (55 seconds), against the existing local validator. TypeScript checks and the browser bundle build also passed.
+
+The email-account release adds normalized unique email accounts, salted password hashing, local confirmation links, email-before-wallet gates, one-account/one-wallet enforcement (including concurrent claims), session-bound signatures, password reset with complete session/socket revocation, persistent rate limits, and account/session failover. Routes are now separated into public `/`, account entry and protected `/app/...` pages. The previous wallet-only flow and browser demo-role selector have been replaced.
+
+Current browser checks: registration → local confirmation preview → confirmation → wallet proof → return to the original `/app/market` destination; rejected then accepted wallet signature; account details, all six navigation sections, mobile layout at 390px, full page reload restoring the session without a wallet provider, logout/Back returning to login, a rejected password followed by a valid sign-in requiring the original wallet again, and zero console errors during the successful flow (the intentional bad password returns HTTP 401). The provider is an ephemeral WebCrypto Ed25519 test adapter; actual Phantom/Solflare extensions were not available. The existing live work history remains **41 events** on all three nodes, with matching hashes and zero pending transactions.
+
+## Earlier platform verification
+
+The following records describe prior platform and wallet-only checks; demo-role UI references below are historical.
 
 The integration suite runs against the compiled Anchor program on a real local Solana validator. It uses independently generated owner, coordinator, reviewer, two provider-owner and two worker keys, and an unauthorized outsider.
 

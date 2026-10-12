@@ -18,6 +18,7 @@ import {
   sectionPaths,
   View,
 } from "../src/routes";
+import type { AccountSession } from "../src/mesh/accounts";
 (globalThis as any).Buffer = Buffer;
 const $ = (id: string) => document.getElementById(id)!;
 const escape = (v: any) =>
@@ -69,14 +70,12 @@ const kinds: any = {
 };
 let route = parseRoute(location.pathname),
   contextReady = false;
-let role = sessionStorage.getItem("mesh-demo-role") || "",
-  key = "",
+let key = "",
   token = "",
-  session: { actor: string; expires: number } | null = null,
-  demo = false,
+  session: AccountSession | null = null,
+  localMail = false,
   health: any = {},
   wallet: any = null,
-  actors: any[] = [],
   context: any = { projects: [], jobs: [], agents: [], offers: [] },
   market: any = { agents: [], jobs: [] },
   entries: any[] = [],
@@ -96,8 +95,7 @@ function resolveWorkspace() {
   // Only the workspace landing page chooses a remembered/default project.
   // Explicit links retain their requested IDs even while identity/data is loading.
   if (route.view !== "workspace" || route.project) return;
-  history.replaceState(null, "", "/projects");
-  readLocation();
+  view = "projects";
 }
 function navigate(path: string, replace = false) {
   if (location.pathname + location.search !== path)
@@ -202,16 +200,6 @@ async function selectRelay() {
       token = "";
     }
     health = chosen.h;
-    if (!token && key && role && demo) {
-      token = (
-        await nodeRequest(
-          activeRelay,
-          "demo/run",
-          { action: "session", actor: role },
-          ""
-        )
-      ).token;
-    }
     if (changed && (token || session)) startStream();
   })();
   try {
@@ -237,17 +225,6 @@ async function api(path: string, data?: any): Promise<any> {
     return result;
   } catch (e) {
     if ((e as any).status === 401 && !path.startsWith("session")) {
-      if (role && demo) {
-        token = (
-          await nodeRequest(
-            activeRelay,
-            "demo/run",
-            { action: "session", actor: role },
-            ""
-          )
-        ).token;
-        return nodeRequest(activeRelay, path, data);
-      }
       clearIdentity();
       if (contextReady) {
         loginRequired();
@@ -258,9 +235,7 @@ async function api(path: string, data?: any): Promise<any> {
     const safe =
       data === undefined ||
       path === "session/logout" ||
-      path === "session/challenge" ||
-      (path === "demo/run" &&
-        ["session", "sign", "context"].includes(data.action));
+      path === "session/challenge";
     if (!cluster || !retryable(e) || !safe) throw e;
     await selectRelay();
     try {
@@ -300,14 +275,11 @@ async function signed(command: any) {
   };
 }
 async function authenticate() {
-  if (role && demo) {
-    key = actors.find((a) => a.id === role)?.key || "";
-    token = (await api("demo/run", { action: "session", actor: role })).token;
-  } else {
-    token = "";
-    session = (await api("session")).session;
-    key = session?.actor || "";
-  }
+  token = "";
+  const result = await api("session");
+  session = result.session;
+  localMail = result.localMail;
+  key = session?.actor || "";
   $("identity-key").textContent = short(key);
   startStream();
   await refresh();
@@ -324,7 +296,6 @@ function clearIdentity() {
     socket.close();
     socket = undefined;
   }
-  role = "";
   key = "";
   token = "";
   session = null;
@@ -370,13 +341,21 @@ function bindWallet(provider: any) {
   }
   wallet = provider;
   walletListener = (address?: any) => {
-    if (session && (!address || address.toBase58() !== key)) {
-      // Stop exposing private data immediately, but report failed revocation.
+    if (session && key && (!address || address.toBase58() !== key)) {
       bindWallet(null);
+      const saved = session;
       clearIdentity();
-      loginRequired();
-      render();
-      logout().catch((e) => toast(e.message));
+      session = { ...saved, actor: "" };
+      navigate(
+        authPath(
+          "/app/connect-wallet",
+          safeReturnPath(location.pathname + location.search)
+        ),
+        true
+      );
+      api("session/disconnect", {}).catch((e) =>
+        toast("Wallet access could not be revoked: " + e.message)
+      );
     }
   };
   wallet?.on?.("accountChanged", walletListener);
@@ -418,7 +397,7 @@ async function loginWallet(providerId: string) {
   );
   if (provider.publicKey.toBase58() !== actor)
     throw Error("Wallet account changed. Please sign in again.");
-  const result = await api("session/login", {
+  const result = await api("session/connect", {
     nonce: challenge.nonce,
     signature: Buffer.from(signed.signature || signed).toString("hex"),
   });
@@ -430,7 +409,7 @@ async function loginWallet(providerId: string) {
   startStream();
   await refresh();
   navigate(next, true);
-  toast("Signed in · " + short(key));
+  toast("Wallet verified · " + short(key));
 }
 async function logout() {
   // Revoke on the majority before reporting success. A failed request leaves a
@@ -449,18 +428,6 @@ async function logout() {
   navigate("/login", true);
   await provider?.disconnect?.().catch(() => {});
   render();
-}
-async function enterDemo() {
-  if (!demo)
-    throw Error("Demo identities are available only in the local sandbox");
-  const next = safeReturnPath(new URLSearchParams(location.search).get("next"));
-  await api("session/logout", {});
-  bindWallet(null);
-  clearIdentity();
-  role = "owner";
-  sessionStorage.setItem("mesh-demo-role", role);
-  await authenticate();
-  navigate(next, true);
 }
 function startStream() {
   clearTimeout(reconnect);
@@ -537,22 +504,11 @@ async function publish(command: any) {
     throw Error(
       "This relay is a read replica. Open the coordinator to publish work."
     );
-  if (!(role && demo)) await ensureWallet();
-  const event =
-    role && demo
-      ? (await api("demo/run", { action: "sign", actor: role, command })).event
-      : await signed(command);
+  await ensureWallet();
+  const event = await signed(command);
   const until = Date.now() + 30000;
   for (;;) {
     try {
-      if (role && demo) {
-        result = await api("demo/run", {
-          action: "publish",
-          actor: role,
-          event,
-        });
-        break;
-      }
       const p = await api("prepare", { event });
       if (p.entry) {
         result = p.entry;
@@ -717,7 +673,6 @@ function form(
 const agentName = (pubkey: string) =>
   context.agents.find((a: any) => a.key === pubkey)?.name ||
   market.agents.find((a: any) => a.key === pubkey)?.name ||
-  actors.find((a) => a.key === pubkey)?.name ||
   short(pubkey);
 const badge = (state: string) =>
   `<span class="badge ${escape(state)}">${escape(
@@ -760,28 +715,272 @@ function jobCard(j: any, publicOnly = false) {
       : routeLink(taskPath(j.project, j.id), "Open task →")
   }</div></article>`;
 }
+const authViews = ["login", "register", "forgot", "reset", "verify", "connect"];
+const nextPath = () =>
+  safeReturnPath(new URLSearchParams(location.search).get("next"));
+const authPath = (page: string, next = nextPath()) =>
+  page + "?next=" + encodeURIComponent(next);
+function guardRoute() {
+  const requested = location.pathname + location.search;
+  const move = (path: string) => {
+    history.replaceState(null, "", path);
+    readLocation();
+    resolveWorkspace();
+  };
+  if (location.pathname.startsWith("/app") && route.view !== "not-found") {
+    const next =
+      route.view === "connect" ? nextPath() : safeReturnPath(requested);
+    if (!session) move(authPath("/login", next));
+    else if (!session.account.verified) move(authPath("/verify-email", next));
+    else if (!session.actor && route.view !== "connect")
+      move(authPath("/app/connect-wallet", next));
+    else if (session.actor && route.view === "connect") move(next);
+  } else if (session && ["login", "register"].includes(route.view)) {
+    move(
+      !session.account.verified
+        ? authPath("/verify-email")
+        : !session.actor
+        ? authPath("/app/connect-wallet")
+        : nextPath()
+    );
+  } else if (
+    session?.account.verified &&
+    route.view === "verify" &&
+    !new URLSearchParams(location.search).get("token")
+  ) {
+    move(session.actor ? nextPath() : authPath("/app/connect-wallet"));
+  }
+}
+function renderAuth() {
+  const next = nextPath(),
+    query = new URLSearchParams(location.search);
+  const heading: Record<string, string> = {
+    login: "Welcome back.",
+    register: "Build with more agents.",
+    forgot: "Reset your password.",
+    reset: "Choose a new password.",
+    verify: "Confirm your email.",
+    connect: session?.account.wallet
+      ? "Reconnect your wallet."
+      : "Link your wallet.",
+  };
+  document.title = heading[view] + " · ctrl-mesh";
+  const email = `<label for="auth-email">Email address</label><input id="auth-email" name="email" type="email" autocomplete="email" inputmode="email" maxlength="254" placeholder="you@example.com" required>`;
+  const password = `<label for="auth-password">Password</label><div class="password-field"><input id="auth-password" name="password" type="password" autocomplete="${
+    view === "login" ? "current-password" : "new-password"
+  }" ${
+    view === "login" ? "" : 'minlength="15"'
+  } maxlength="128" required><button type="button" id="show-password" aria-label="Show password">Show</button></div>${
+    view === "login"
+      ? ""
+      : '<p class="field-hint">At least 15 characters. A few unrelated words work well.</p>'
+  }`;
+  let content = "",
+    bottom = "",
+    intro = "";
+  if (["login", "register", "forgot", "reset"].includes(view)) {
+    const label = (
+      {
+        login: "Sign in",
+        register: "Create account",
+        forgot: "Create reset email",
+        reset: "Save new password",
+      } as Record<string, string>
+    )[view];
+    intro =
+      view === "register"
+        ? "Create your account, confirm your email, then connect a Solana wallet."
+        : view === "login"
+        ? "Sign in with your email. Your wallet is connected in the next step."
+        : view === "forgot"
+        ? "Enter your account email to request a password reset."
+        : "Saving your password signs out all existing sessions.";
+    content = `<form id="auth-form"><fieldset ${authBusy ? "disabled" : ""}>${
+      view !== "reset" ? email : ""
+    }${view !== "forgot" ? password : ""}${
+      view === "login"
+        ? routeLink(
+            authPath("/forgot-password"),
+            "Forgot password?",
+            "auth-text-link"
+          )
+        : ""
+    }<p id="auth-error" role="alert"></p><button class="button primary" type="submit">${label} <span>↗</span></button></fieldset></form>`;
+    bottom =
+      view === "login"
+        ? `New to ctrl-mesh? ${routeLink(
+            authPath("/register"),
+            "Create an account",
+            "auth-text-link"
+          )}`
+        : `Already have an account? ${routeLink(
+            authPath("/login"),
+            "Sign in",
+            "auth-text-link"
+          )}`;
+  } else if (view === "verify") {
+    intro = session
+      ? `Confirm <strong>${escape(session.account.email)}</strong> to continue.`
+      : "Open your confirmation link, then sign in to continue.";
+    content = query.get("token")
+      ? `<p>This link confirms the email address used to create your account.</p>${button(
+          "verify-email",
+          "Confirm email",
+          "",
+          "primary"
+        )}`
+      : `<p>Open the confirmation email and follow its link.</p>${
+          localMail
+            ? `<div class="local-mail"><span class="badge">LOCAL EMAIL PREVIEW</span><p>No email is sent. View the confirmation saved on this computer.</p>${button(
+                "preview-email",
+                "View confirmation email"
+              )}</div>`
+            : ""
+        }${
+          session
+            ? button("resend-email", "Create a new confirmation email")
+            : routeLink(authPath("/login"), "Sign in")
+        }`;
+    content +=
+      '<div id="email-preview"></div><p id="auth-error" role="alert"></p>';
+    bottom = session
+      ? button("logout", "Use another account", "", "quiet")
+      : "";
+  } else {
+    intro = `Signed in as <strong>${escape(
+      session!.account.email
+    )}</strong>. Verify wallet ownership with a signature.`;
+    const providers = walletProviders();
+    content = `${
+      session!.account.wallet
+        ? `<div class="linked-address"><span class="small-label">LINKED WALLET</span><p class="hash">${escape(
+            session!.account.wallet
+          )}</p></div><p>Choose this same wallet in your wallet app.</p>`
+        : `<p>This wallet becomes the payment identity for your account. Each wallet can belong to one account.</p>`
+    }<div class="auth-actions">${
+      providers.length
+        ? providers
+            .map((p) =>
+              button(
+                "login-wallet",
+                "Connect " + escape(p.name),
+                p.id,
+                "primary"
+              )
+            )
+            .join("")
+        : '<div class="notice">No Solana wallet detected. Open this page in a browser with Phantom or Solflare, then refresh.</div><a class="button" href="https://phantom.com/" target="_blank" rel="noopener noreferrer">Get Phantom ↗</a>'
+    }</div><p class="tiny muted">Connecting signs a message. It does not send SOL or authorize a payment.</p><p id="auth-error" role="alert"></p>`;
+    bottom = button("logout", "Sign out", "", "quiet");
+  }
+  $(
+    "content"
+  ).innerHTML = `<div class="auth-shell"><a href="/" class="auth-brand">ctrl-mesh<span>↗</span></a><div class="auth-progress" aria-label="Account setup"><span class="${
+    ["login", "register", "forgot", "reset"].includes(view) ? "current" : ""
+  }">01 Account</span><span class="${
+    view === "verify" ? "current" : ""
+  }">02 Email</span><span class="${
+    view === "connect" ? "current" : ""
+  }">03 Wallet</span></div><section class="panel auth-card"><h1>${
+    heading[view]
+  }</h1><p class="auth-intro">${intro}</p>${content}<div class="auth-bottom">${bottom}</div></section><p class="auth-footer">Shared context. Independent agents. Verifiable work.</p></div>`;
+  if (authBusy)
+    $("content")
+      .querySelectorAll<HTMLButtonElement>("button")
+      .forEach((b) => (b.disabled = true));
+  const toggle = $("show-password");
+  if (toggle)
+    toggle.onclick = () => {
+      const input = $("auth-password") as HTMLInputElement;
+      input.type = input.type === "password" ? "text" : "password";
+      toggle.textContent = input.type === "password" ? "Show" : "Hide";
+      toggle.setAttribute("aria-label", toggle.textContent + " password");
+    };
+  const form = $("auth-form") as HTMLFormElement | null;
+  if (form)
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      if (authBusy) return;
+      const input = Object.fromEntries(new FormData(form)),
+        submittedView = view;
+      const fieldset = form.querySelector("fieldset")!;
+      fieldset.disabled = true;
+      authBusy = true;
+      $("auth-error").textContent = "";
+      try {
+        await selectRelay();
+        if (submittedView === "forgot") {
+          await api("session/forgot", input);
+          form.innerHTML = `<div class="notice" role="status">If this email has an account, a reset message is available in the local mail folder. No email has been sent.</div><p class="tiny muted">The local operator can open the saved reset link. Reset links expire in 30 minutes.</p>`;
+        } else if (submittedView === "reset") {
+          await api("session/reset", { ...input, token: query.get("token") });
+          bindWallet(null);
+          clearIdentity();
+          navigate(authPath("/login", next), true);
+          toast("Password updated. Sign in again.");
+        } else {
+          const result = await api("session/" + submittedView, input);
+          bindWallet(null);
+          clearIdentity();
+          session = result;
+          key = result.actor;
+          authBusy = false;
+          await refresh();
+          navigate(next, true);
+        }
+      } catch (e) {
+        if ($("auth-error")) $("auth-error").textContent = (e as Error).message;
+        else toast((e as Error).message);
+      } finally {
+        authBusy = false;
+        fieldset.disabled = false;
+      }
+    };
+}
+async function emailAction(name: string) {
+  if (name === "preview-email") {
+    const { message } = await api("session/local-email");
+    if (!message) throw Error("No confirmation email found. Create a new one.");
+    const url = new URL(message.url);
+    url.searchParams.set("next", nextPath());
+    $(
+      "email-preview"
+    ).innerHTML = `<div class="local-mail"><p class="small-label">TO ${escape(
+      message.to
+    )}</p><h3>${escape(
+      message.subject
+    )}</h3><p>Confirm your email to continue setting up ctrl-mesh.</p>${routeLink(
+      url.pathname + url.search,
+      "Open confirmation link →"
+    )}</div>`;
+  } else if (name === "resend-email") {
+    await api("session/resend", {});
+    toast("A new confirmation is saved in local email preview.");
+    if (localMail) await emailAction("preview-email");
+  } else {
+    await api("session/verify", {
+      token: new URLSearchParams(location.search).get("token"),
+    });
+    const next = nextPath();
+    history.replaceState(null, "", authPath("/verify-email", next));
+    await authenticate();
+    navigate(session ? next : authPath("/login", next), true);
+    toast("Email confirmed.");
+  }
+}
+
 function render() {
-  if (
-    !key &&
-    ["workspace", "projects", "activity", "network", "account"].includes(
-      route.view
-    ) &&
-    !route.job
-  )
-    loginRequired();
-  $("identity-key").textContent = key ? short(key) : "Guest";
-  $("wallet").textContent = key
-    ? role
-      ? "Demo account"
-      : "My account"
-    : "Sign in";
-  $("actor").hidden = !role;
-  ($("actor") as HTMLSelectElement).value = role;
-  (document.querySelector('label[for="actor"]') as HTMLElement).hidden = !role;
-  $("sandbox-note").hidden = !role;
-  $("new-project").hidden =
-    !key || route.view === "login" || route.view === "account";
-  $("stats").hidden = ["login", "account", "not-found"].includes(route.view);
+  guardRoute();
+  const auth = authViews.includes(route.view);
+  document.body.classList.remove("auth-pending");
+  document.body.classList.toggle("auth-page", auth);
+  $("identity-key").textContent = key
+    ? short(key)
+    : session?.account.email || "Guest";
+  $("wallet").textContent = session ? "My account" : "Sign in";
+  $("new-project").hidden = !key || route.view === "account" || auth;
+  $("stats").hidden = auth || ["account", "not-found"].includes(route.view);
+  if (auth) return renderAuth();
   const jobs = context.jobs,
     paid = jobs.reduce(
       (s: number, j: any) =>
@@ -831,7 +1030,7 @@ function render() {
       if (active) b.setAttribute("aria-current", "page");
       else b.removeAttribute("aria-current");
       if (b.dataset.view === "workspace") {
-        b.href = "/projects";
+        b.href = "/app/projects";
       }
     });
   const titles: any = {
@@ -870,16 +1069,19 @@ function render() {
   };
   $("title").textContent = titles[view][0];
   $("subtitle").textContent = titles[view][1];
-  $("header-title").textContent = {
-    network: "Privacy & network",
-    workspace: "Project overview",
-    market: "Task market",
-    agents: "Agent directory",
-    activity: "Event stream",
-    projects: "Projects",
-    login: "Sign in",
-    account: "Account",
-  }[view]!;
+  $("header-title").textContent =
+    (
+      {
+        network: "Privacy & network",
+        workspace: "Project overview",
+        market: "Task market",
+        agents: "Agent directory",
+        activity: "Event stream",
+        projects: "Projects",
+        login: "Sign in",
+        account: "Account",
+      } as Partial<Record<View, string>>
+    )[view] || "Workspace";
   document.title = $("header-title").textContent + " · ctrl-mesh";
   if (route.view === "not-found") {
     renderUnavailable(
@@ -888,71 +1090,26 @@ function render() {
     );
     return;
   }
-  if (view === "login") {
-    const providers = walletProviders();
-    $(
-      "content"
-    ).innerHTML = `<div class="auth-layout"><section class="panel auth-card"><span class="badge">SOLANA WALLET</span><h2>Sign in to ctrl-mesh</h2><p>Choose your wallet and approve the sign-in message. Your wallet remains in control of every transaction.</p><div class="auth-actions">${
-      providers.length
-        ? providers
-            .map((p) =>
-              button(
-                "login-wallet",
-                "Continue with " + escape(p.name),
-                p.id,
-                "primary"
-              )
-            )
-            .join("")
-        : '<p class="notice">No Solana wallet was detected in this browser. Install Phantom or open this page in your wallet browser, then refresh.</p><a class="button" href="https://phantom.com/" target="_blank" rel="noopener noreferrer">Get Phantom ↗</a>'
-    }</div><p id="auth-error" role="alert"></p><p class="tiny muted">A signed message verifies wallet ownership. Signing in costs no SOL. Your session lasts up to 8 hours.</p>${routeLink(
-      "/market",
-      "Browse public tasks →",
-      "task-link"
-    )}${logoutPending ? button("logout", "Retry sign out") : ""}</section>${
-      demo
-        ? `<section class="panel demo-card"><span class="badge">LOCAL DEMO</span><h2>Explore the agent workflow</h2><p>Try the owner, coordinator, reviewer and contributor roles with test identities and local test SOL.</p>${button(
-            "enter-demo",
-            "Enter demo workspace"
-          )}<p class="tiny muted">Demo identities are shared sandbox keys. Use wallet sign-in for your own identity.</p></section>`
-        : ""
-    }</div>`;
-    $("content")
-      .querySelectorAll<HTMLButtonElement>(
-        'button[data-action="login-wallet"], button[data-action="enter-demo"]'
-      )
-      .forEach((b) => (b.disabled = authBusy));
-    if (authBusy) $("auth-error").textContent = "Completing sign-in…";
-    return;
-  }
   if (view === "account") {
     $(
       "content"
-    ).innerHTML = `<div class="split"><section class="panel"><span class="badge">${
-      role ? "DEMO IDENTITY" : "SIGNED IN"
-    }</span><h2>${
-      role
-        ? escape(actors.find((a) => a.id === role)?.name || role)
-        : "Solana wallet"
-    }</h2><p class="hash">${escape(key)}</p><p>${
-      role
-        ? "This is an explicitly selected local demo role."
-        : "Session expires " +
-          escape(new Date(session!.expires).toLocaleString())
-    }</p><div class="actions">${button(
-      "logout",
-      role ? "Leave demo" : "Sign out"
-    )}${routeLink(
-      "/network",
-      "Privacy & encryption"
+    ).innerHTML = `<div class="split"><section class="panel"><span class="badge">VERIFIED ACCOUNT</span><h2>${escape(
+      session!.account.email
+    )}</h2><p class="small-label">LINKED SOLANA WALLET</p><p class="hash">${escape(
+      session!.account.wallet
+    )}</p><p>This wallet is uniquely linked to your email account. A different wallet cannot access this workspace.</p><p class="tiny muted">Session expires ${escape(
+      new Date(session!.expires).toLocaleString()
+    )}</p><div class="actions">${button("logout", "Sign out")}${routeLink(
+      "/forgot-password",
+      "Reset password"
     )}</div></section><section class="panel"><h2>Your access</h2><p>${
       context.projects.length
     } projects · ${
       context.jobs.length
-    } accessible tasks</p><p>Project owners set coordinator budgets. Contributors see their assigned work, and reviewers approve results before payment.</p>${routeLink(
-      "/projects",
+    } accessible tasks</p><p>Project owners set coordinator budgets. Reviewers approve results before contributors receive payment.</p>${routeLink(
+      "/app",
       "Open projects →"
-    )}</section></div>`;
+    )}${routeLink("/app/network", "Privacy & encryption")}</section></div>`;
     return;
   }
   if (view === "projects") {
@@ -998,7 +1155,7 @@ function render() {
             "Create a project",
             "",
             "primary"
-          )} ${routeLink("/market", "Browse tasks")}</div>`);
+          )} ${routeLink("/app/market", "Browse tasks")}</div>`);
     return;
   }
   if (route.agent) {
@@ -1011,7 +1168,7 @@ function render() {
     document.title = a.name + " · ctrl-mesh";
     $("title").textContent = a.name;
     $("content").innerHTML = `${routeLink(
-      "/agents",
+      "/app/agents",
       "← Agent directory"
     )}<section class="panel agent-profile"><span class="badge">Ownership signed</span><h2>${escape(
       a.name
@@ -1025,7 +1182,7 @@ function render() {
       a.key
     )}</p><h3>Payment recipient / owner</h3><p class="hash">${escape(
       a.owner
-    )}</p>${routeLink("/market", "Browse funded tasks →")}</section>`;
+    )}</p>${routeLink("/app/market", "Browse funded tasks →")}</section>`;
     return;
   }
   if (selectedJob) {
@@ -1534,16 +1691,17 @@ function renderDetail() {
   }</div></section></div></div>`;
 }
 async function action(name: string, id: string) {
-  if (name === "login-wallet" || name === "enter-demo") {
+  if (["preview-email", "resend-email", "verify-email"].includes(name))
+    return emailAction(name);
+  if (name === "login-wallet") {
     if (authBusy) return;
     authBusy = true;
     render();
     try {
-      if (name === "login-wallet") await loginWallet(id);
-      else await enterDemo();
+      await loginWallet(id);
     } finally {
       authBusy = false;
-      if (route.view === "login") render();
+      if (route.view === "connect") render();
     }
     return;
   }
@@ -1682,37 +1840,10 @@ async function action(name: string, id: string) {
     return;
   }
   if (name === "back") {
-    navigate(route.project ? projectPath(route.project) : "/");
+    navigate(route.project ? projectPath(route.project) : "/app");
     return;
   }
   if (name === "new-project") {
-    if (demo && role)
-      return form(
-        "Create a delegated project",
-        [
-          {
-            name: "title",
-            label: "Project title",
-            value: "Build the next release",
-          },
-          {
-            name: "brief",
-            label: "Goal and acceptance criteria",
-            type: "textarea",
-            value:
-              "Deliver a tested API and its interface through independent agent contributions.",
-          },
-        ],
-        async (v) => {
-          const r = await api("demo/run", { action: "seed", ...v });
-          role = "owner";
-          ($("actor") as HTMLSelectElement).value = role;
-          await authenticate();
-          navigate(projectPath(r.project));
-          toast("Project funded · Atlas can delegate up to 0.15 SOL");
-        },
-        "Fund sandbox project · 0.25 SOL"
-      );
     await ensureWallet();
     return form(
       "Create project",
@@ -1920,7 +2051,7 @@ async function action(name: string, id: string) {
             { path: filePath, base64: Buffer.from(bytes).toString("base64") },
           ];
         let pkg;
-        if (!role) {
+        {
           const artifacts = [
               {
                 path: filePath,
@@ -2114,7 +2245,7 @@ async function action(name: string, id: string) {
         })
     );
   if (name === "register") {
-    if (!role) await ensureWallet();
+    await ensureWallet();
     return form(
       "Register an agent",
       [
@@ -2216,20 +2347,9 @@ $("content").onclick = async (e) => {
 };
 $("new-project").onclick = () =>
   action("new-project", "").catch((e) => toast(e.message));
-$("actor").onchange = async () => {
-  const chosen = ($("actor") as HTMLSelectElement).value;
-  if (!chosen) return logout().catch((e) => toast(e.message));
-  clearIdentity();
-  bindWallet(null);
-  role = chosen;
-  sessionStorage.setItem("mesh-demo-role", role);
-  // Preserve the address while changing identity so authorized users can open
-  // a shared link after connecting, and other identities see the access state.
-  await authenticate().catch((e) => toast(e.message));
-};
 $("wallet").onclick = () =>
-  key
-    ? navigate("/account")
+  session
+    ? navigate("/app/account")
     : route.view === "login"
     ? render()
     : navigate(
@@ -2240,25 +2360,6 @@ $("wallet").onclick = () =>
       );
 async function initialize() {
   health = await api("health");
-  demo = health.demo;
-  if (demo) {
-    actors = await api("demo/actors");
-    $("actor").innerHTML =
-      '<option value="">Public visitor</option>' +
-      actors
-        .map(
-          (a) =>
-            `<option value="${escape(a.id)}">${escape(a.name)} · ${escape(
-              a.role
-            )}</option>`
-        )
-        .join("");
-    ($("actor") as HTMLSelectElement).value = role;
-  } else {
-    role = "";
-    $("actor").hidden = true;
-    document.querySelector('label[for="actor"]')!.setAttribute("hidden", "");
-  }
   await authenticate();
 }
 (async () => {

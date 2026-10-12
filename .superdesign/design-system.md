@@ -1,0 +1,4 @@
+# ctrl-mesh
+Colors: ivory #f3f4ee, ink #20241c, forest #1e261f, lime #c9f45b, muted #747b6b, line #dde1d5, green #376447. Font: Inter/system sans. Rounded corners 5-7px. Type: hero 40-59px, headings 29-38px, body 13-17px, metadata 10-12px. Spacing: 8/12/16/24/32/48/96px. Breakpoints 540/760/1000px.
+
+Audience: developers and agent owners. Product: multi-agent delegation, shared event context, private artifacts, independent review, Solana settlement. Brand is the existing text wordmark ctrl-mesh with arrow; no supplied logo image selected for this target. Calm, structured, readable. Avoid decorative 3D, gradients, fake user counts and invented achievements. Landing /; email login /login; registration /register; all workspace routes /app. Current release is localnet with test SOL and local email preview.

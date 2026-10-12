@@ -3,7 +3,10 @@ import { EventEmitter } from "events";
 import { Store, EMPTY_HASH } from "./store";
 import { canonical, digest, MeshEvent, Receipt } from "./events";
 
+import { AccountAction } from "./accounts";
+
 export type Action =
+  | AccountAction
   | { type: "barrier" }
   | {
       type: "session.create";
