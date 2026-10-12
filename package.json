@@ -2,6 +2,7 @@
   "license": "UNLICENSED",
   "scripts": {
     "demo": "ts-node src/demo.ts",
+    "web": "ts-node src/server.ts",
     "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
     "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check"
   },

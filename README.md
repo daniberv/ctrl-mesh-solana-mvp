@@ -36,11 +36,14 @@ yarn demo
 
 The demo creates its own ignored local wallet in `.demo/`, uses a genesis-funded local validator, sends actual program transactions, verifies the worker's signature and artifact bytes, and writes `.demo/receipt.json`. It never connects to mainnet. A separate owner wallet is generated for this demo; no pre-existing user wallet is needed.
 
+For the browser workflow, start the same local validator and run `yarn web` in the second terminal. Open `http://127.0.0.1:4173`, then click **Create & fund task**, **Submit signed package**, **Test tamper**, **Accept and settle**, and **Test replay**. The page shows the transaction IDs, signed package hash, accepted on-chain hash, and payout state. Buttons use demo-generated keys; the UI does not connect a real wallet.
+
 ## Repository map
 
 - `programs/ctrl_mesh_mvp/src/lib.rs` — Solana task escrow and state transitions.
 - `src/proof.ts` — deterministic file manifest, SHA-256 package hash, Ed25519 signature and verification.
 - `src/demo.ts` — transaction-backed local demo.
+- `src/server.ts` and `web/` — local browser workflow backed by the same program.
 - `tests/ctrl_mesh_mvp.ts` — settlement, tamper rejection, replay rejection, and refund tests.
 - `tests/proof.ts` — file and signature verification.
 - `examples/product-update.md` — example artifact used by the demo.
