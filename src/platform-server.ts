@@ -113,6 +113,7 @@ async function main() {
     port,
     host,
     federation,
+    publicOrigin: process.env.MESH_PUBLIC_ORIGIN,
     ...(demo
       ? {
           demo: demoControl(

@@ -9,6 +9,15 @@ import {
 import { verifyPreparedTransaction } from "../src/mesh/transaction";
 import { Transaction, PublicKey } from "@solana/web3.js";
 import { Buffer } from "buffer";
+import {
+  parseRoute,
+  projectPath,
+  taskPath,
+  agentPath,
+  safeReturnPath,
+  sectionPaths,
+  View,
+} from "../src/routes";
 (globalThis as any).Buffer = Buffer;
 const $ = (id: string) => document.getElementById(id)!;
 const escape = (v: any) =>
@@ -58,9 +67,12 @@ const kinds: any = {
   progress: 1,
   "epoch.close": 30086,
 };
-let role = localStorage.getItem("mesh-role") || "owner",
+let route = parseRoute(location.pathname),
+  contextReady = false;
+let role = sessionStorage.getItem("mesh-demo-role") || "",
   key = "",
   token = "",
+  session: { actor: string; expires: number } | null = null,
   demo = false,
   health: any = {},
   wallet: any = null,
@@ -68,12 +80,64 @@ let role = localStorage.getItem("mesh-role") || "owner",
   context: any = { projects: [], jobs: [], agents: [], offers: [] },
   market: any = { agents: [], jobs: [] },
   entries: any[] = [],
-  view = "workspace",
-  selectedJob = "",
-  projectId = localStorage.getItem("mesh-project") || "",
+  view: View = route.view === "not-found" ? "workspace" : route.view,
+  selectedJob = route.job || "",
+  projectId = route.project || localStorage.getItem("mesh-project") || "",
   socket: WebSocket | undefined,
   reconnect: any,
   refreshTimer: any;
+function readLocation() {
+  route = parseRoute(location.pathname);
+  view = route.view === "not-found" ? "workspace" : route.view;
+  selectedJob = route.job || "";
+  projectId = route.project || localStorage.getItem("mesh-project") || "";
+}
+function resolveWorkspace() {
+  // Only the workspace landing page chooses a remembered/default project.
+  // Explicit links retain their requested IDs even while identity/data is loading.
+  if (route.view !== "workspace" || route.project) return;
+  history.replaceState(null, "", "/projects");
+  readLocation();
+}
+function navigate(path: string, replace = false) {
+  if (location.pathname + location.search !== path)
+    history[replace ? "replaceState" : "pushState"](null, "", path);
+  readLocation();
+  if (contextReady) {
+    resolveWorkspace();
+    render();
+  }
+  ($("dialog") as HTMLDialogElement).close();
+  window.scrollTo(0, 0);
+}
+window.addEventListener("popstate", () => {
+  readLocation();
+  if (contextReady) {
+    resolveWorkspace();
+    render();
+  }
+  ($("dialog") as HTMLDialogElement).close();
+});
+document.addEventListener("click", (event) => {
+  const link = (event.target as Element).closest("a[data-route]");
+  if (
+    !link ||
+    event.defaultPrevented ||
+    event.button !== 0 ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.shiftKey ||
+    event.altKey
+  )
+    return;
+  const href = link.getAttribute("href");
+  if (!href || link.getAttribute("target") || link.hasAttribute("download"))
+    return;
+  const url = new URL(href, location.href);
+  if (url.origin !== location.origin) return;
+  event.preventDefault();
+  navigate(url.pathname + url.search);
+});
 let activeRelay = location.origin,
   cluster = "",
   stream = "",
@@ -94,6 +158,7 @@ async function nodeRequest(
     body: data === undefined ? undefined : JSON.stringify(data),
     signal: AbortSignal.timeout(7000),
     redirect: "error",
+    credentials: "include",
   });
   const result = await r.json();
   if (!r.ok)
@@ -137,34 +202,17 @@ async function selectRelay() {
       token = "";
     }
     health = chosen.h;
-    if (!token && key) {
-      if (role && demo)
-        token = (
-          await nodeRequest(
-            activeRelay,
-            "demo/run",
-            { action: "session", actor: role },
-            ""
-          )
-        ).token;
-      else if (wallet) {
-        const { nonce } = await nodeRequest(
+    if (!token && key && role && demo) {
+      token = (
+        await nodeRequest(
           activeRelay,
-          "challenge",
-          undefined,
+          "demo/run",
+          { action: "session", actor: role },
           ""
-        );
-        token = (
-          await nodeRequest(
-            activeRelay,
-            "auth",
-            { event: await signed({ action: "auth", nonce }) },
-            ""
-          )
-        ).token;
-      }
+        )
+      ).token;
     }
-    if (changed && token) startStream();
+    if (changed && (token || session)) startStream();
   })();
   try {
     await selecting;
@@ -172,7 +220,7 @@ async function selectRelay() {
     selecting = undefined;
   }
 }
-async function api(path: string, data?: any) {
+async function api(path: string, data?: any): Promise<any> {
   if (selecting) await selecting;
   try {
     const result = await nodeRequest(activeRelay, path, data);
@@ -188,13 +236,39 @@ async function api(path: string, data?: any) {
     }
     return result;
   } catch (e) {
+    if ((e as any).status === 401 && !path.startsWith("session")) {
+      if (role && demo) {
+        token = (
+          await nodeRequest(
+            activeRelay,
+            "demo/run",
+            { action: "session", actor: role },
+            ""
+          )
+        ).token;
+        return nodeRequest(activeRelay, path, data);
+      }
+      clearIdentity();
+      if (contextReady) {
+        loginRequired();
+        render();
+      }
+      throw Error("Your session ended. Sign in again to continue.");
+    }
     const safe =
       data === undefined ||
+      path === "session/logout" ||
+      path === "session/challenge" ||
       (path === "demo/run" &&
         ["session", "sign", "context"].includes(data.action));
     if (!cluster || !retryable(e) || !safe) throw e;
     await selectRelay();
-    return nodeRequest(activeRelay, path, data);
+    try {
+      return await nodeRequest(activeRelay, path, data);
+    } catch (retry) {
+      if ((retry as any).status === 401) return api(path, data);
+      throw retry;
+    }
   }
 }
 function toast(message: string) {
@@ -229,18 +303,164 @@ async function authenticate() {
   if (role && demo) {
     key = actors.find((a) => a.id === role)?.key || "";
     token = (await api("demo/run", { action: "session", actor: role })).token;
-  } else if (wallet) {
-    const { nonce } = await api("challenge");
-    token = (
-      await api("auth", { event: await signed({ action: "auth", nonce }) })
-    ).token;
   } else {
-    key = "";
     token = "";
+    session = (await api("session")).session;
+    key = session?.actor || "";
   }
   $("identity-key").textContent = short(key);
   startStream();
   await refresh();
+}
+let identityRevision = 0,
+  logoutPending = false,
+  authBusy = false;
+function clearIdentity() {
+  identityRevision++;
+  clearTimeout(reconnect);
+  clearTimeout(refreshTimer);
+  if (socket) {
+    socket.onclose = null;
+    socket.close();
+    socket = undefined;
+  }
+  role = "";
+  key = "";
+  token = "";
+  session = null;
+  sessionStorage.removeItem("mesh-demo-role");
+  context = { projects: [], jobs: [], agents: [], offers: [] };
+  entries = [];
+  $("connection").textContent = "Public directory";
+}
+function loginRequired() {
+  if (route.view !== "login") {
+    history.replaceState(
+      null,
+      "",
+      "/login?next=" +
+        encodeURIComponent(safeReturnPath(location.pathname + location.search))
+    );
+    readLocation();
+  }
+}
+function walletProviders(): { id: string; name: string; provider: any }[] {
+  const w = window as any;
+  const list = [
+    { id: "phantom", name: "Phantom", provider: w.phantom?.solana },
+    { id: "solflare", name: "Solflare", provider: w.solflare },
+    {
+      id: "injected",
+      name: w.solana?.isPhantom ? "Phantom" : "Solana wallet",
+      provider: w.solana,
+    },
+  ];
+  return list.filter(
+    (p, i) =>
+      p.provider?.connect &&
+      p.provider?.signMessage &&
+      list.findIndex((x) => x.provider === p.provider) === i
+  );
+}
+let walletListener: ((address?: any) => void) | undefined;
+function bindWallet(provider: any) {
+  if (wallet && walletListener) {
+    wallet.removeListener?.("accountChanged", walletListener);
+    wallet.removeListener?.("disconnect", walletListener);
+  }
+  wallet = provider;
+  walletListener = (address?: any) => {
+    if (session && (!address || address.toBase58() !== key)) {
+      // Stop exposing private data immediately, but report failed revocation.
+      bindWallet(null);
+      clearIdentity();
+      loginRequired();
+      render();
+      logout().catch((e) => toast(e.message));
+    }
+  };
+  wallet?.on?.("accountChanged", walletListener);
+  wallet?.on?.("disconnect", walletListener);
+}
+async function ensureWallet() {
+  if (!session || !key) throw Error("Sign in with your wallet first");
+  const provider =
+    wallet ||
+    walletProviders().find((p) => p.id === localStorage.getItem("mesh-wallet"))
+      ?.provider ||
+    walletProviders()[0]?.provider;
+  if (!provider)
+    throw Error(
+      "Open this page in the browser where your Solana wallet is installed."
+    );
+  await provider.connect();
+  if (provider.publicKey?.toBase58() !== key)
+    throw Error(
+      "This wallet is different from your signed-in account. Switch the wallet account or sign out first."
+    );
+  bindWallet(provider);
+}
+async function loginWallet(providerId: string) {
+  const provider = walletProviders().find((p) => p.id === providerId)?.provider;
+  if (!provider)
+    throw Error(
+      "Wallet not found. Install or unlock your wallet, then refresh this page."
+    );
+  const next = safeReturnPath(new URLSearchParams(location.search).get("next"));
+  await provider.connect();
+  const actor = provider.publicKey.toBase58();
+  await selectRelay();
+  const challenge = await api("session/challenge", { actor });
+  // The wallet must see the actual page origin, even when a backup serves the API.
+  const signed = await provider.signMessage(
+    new TextEncoder().encode(challenge.message),
+    "utf8"
+  );
+  if (provider.publicKey.toBase58() !== actor)
+    throw Error("Wallet account changed. Please sign in again.");
+  const result = await api("session/login", {
+    nonce: challenge.nonce,
+    signature: Buffer.from(signed.signature || signed).toString("hex"),
+  });
+  clearIdentity();
+  session = result;
+  key = result.actor;
+  localStorage.setItem("mesh-wallet", providerId);
+  bindWallet(provider);
+  startStream();
+  await refresh();
+  navigate(next, true);
+  toast("Signed in · " + short(key));
+}
+async function logout() {
+  // Revoke on the majority before reporting success. A failed request leaves a
+  // visible retry action; it must never be described as a completed logout.
+  logoutPending = true;
+  try {
+    await api("session/logout", {});
+  } catch (e) {
+    render();
+    throw e;
+  }
+  logoutPending = false;
+  const provider = wallet;
+  bindWallet(null);
+  clearIdentity();
+  navigate("/login", true);
+  await provider?.disconnect?.().catch(() => {});
+  render();
+}
+async function enterDemo() {
+  if (!demo)
+    throw Error("Demo identities are available only in the local sandbox");
+  const next = safeReturnPath(new URLSearchParams(location.search).get("next"));
+  await api("session/logout", {});
+  bindWallet(null);
+  clearIdentity();
+  role = "owner";
+  sessionStorage.setItem("mesh-demo-role", role);
+  await authenticate();
+  navigate(next, true);
 }
 function startStream() {
   clearTimeout(reconnect);
@@ -248,7 +468,7 @@ function startStream() {
     socket.onclose = null;
     socket.close();
   }
-  if (!token) {
+  if (!key) {
     $("connection").textContent = "Public directory";
     return;
   }
@@ -258,14 +478,27 @@ function startStream() {
     socket!.send(JSON.stringify(["REQ", "live", { after: 0 }]));
     $("connection").textContent = "Live · subscribed";
   };
-  socket.onmessage = () => {
+  socket.onmessage = (message) => {
+    const frame = JSON.parse(message.data);
+    if (frame[0] === "NOTICE" && frame[1] === "Authentication required") {
+      clearIdentity();
+      loginRequired();
+      render();
+      return;
+    }
     clearTimeout(refreshTimer);
     refreshTimer = setTimeout(
       () => refresh().catch((e) => toast(e.message)),
       100
     );
   };
-  socket.onclose = () => {
+  socket.onclose = (event) => {
+    if (event.code === 4001) {
+      clearIdentity();
+      loginRequired();
+      render();
+      return;
+    }
     $("connection").textContent = "Reconnecting…";
     reconnect = setTimeout(
       () =>
@@ -281,21 +514,21 @@ function startStream() {
   };
 }
 async function refresh() {
+  const revision = identityRevision;
   const result = await Promise.all([
     api("market"),
-    token
+    key
       ? api("context")
       : Promise.resolve({ projects: [], jobs: [], agents: [], offers: [] }),
-    token ? api("events") : Promise.resolve({ entries: [] }),
+    key ? api("events") : Promise.resolve({ entries: [] }),
   ]);
+  const nextHealth = await api("health");
+  if (revision !== identityRevision) return;
   [market, context] = result;
-  health = await api("health");
+  health = nextHealth;
   entries = result[2].entries;
-  if (
-    !context.projects.some((p: any) => p.id === projectId) &&
-    context.projects.length
-  )
-    projectId = context.projects.at(-1).id;
+  contextReady = true;
+  resolveWorkspace();
   render();
 }
 async function publish(command: any) {
@@ -304,8 +537,7 @@ async function publish(command: any) {
     throw Error(
       "This relay is a read replica. Open the coordinator to publish work."
     );
-  if (!wallet && !(role && demo))
-    throw Error("Connect a wallet or select a sandbox role");
+  if (!(role && demo)) await ensureWallet();
   const event =
     role && demo
       ? (await api("demo/run", { action: "sign", actor: role, command })).event
@@ -495,6 +727,8 @@ const button = (action: string, text: string, job = "", cls = "") =>
   `<button class="button ${cls}" data-action="${action}" data-job="${escape(
     job
   )}">${text}</button>`;
+const routeLink = (path: string, text: string, cls = "button") =>
+  `<a class="${cls}" href="${escape(path)}" data-route>${text}</a>`;
 const pCurrent = () => context.projects.find((p: any) => p.id === projectId);
 const manager = (p: any) =>
   p &&
@@ -506,7 +740,11 @@ function jobCard(j: any, publicOnly = false) {
     publicOnly
       ? "OPEN TO AGENTS"
       : `${j.members.length} contributors · v${j.revision}`
-  }</span></div><h3>${escape(j.title)}</h3><p>${escape(j.brief.slice(0, 150))}${
+  }</span></div><h3>${routeLink(
+    taskPath(j.project, j.id),
+    escape(j.title),
+    "task-link"
+  )}</h3><p>${escape(j.brief.slice(0, 150))}${
     j.brief.length > 150 ? "…" : ""
   }</p><div class="tags">${j.skills
     .map((s: string) => `<span class="tag">${escape(s)}</span>`)
@@ -519,10 +757,31 @@ function jobCard(j: any, publicOnly = false) {
   }</div></div>${
     publicOnly
       ? button("offer", "Make an offer ↗", j.id)
-      : button("open", "Open task →", j.id)
+      : routeLink(taskPath(j.project, j.id), "Open task →")
   }</div></article>`;
 }
 function render() {
+  if (
+    !key &&
+    ["workspace", "projects", "activity", "network", "account"].includes(
+      route.view
+    ) &&
+    !route.job
+  )
+    loginRequired();
+  $("identity-key").textContent = key ? short(key) : "Guest";
+  $("wallet").textContent = key
+    ? role
+      ? "Demo account"
+      : "My account"
+    : "Sign in";
+  $("actor").hidden = !role;
+  ($("actor") as HTMLSelectElement).value = role;
+  (document.querySelector('label[for="actor"]') as HTMLElement).hidden = !role;
+  $("sandbox-note").hidden = !role;
+  $("new-project").hidden =
+    !key || route.view === "login" || route.view === "account";
+  $("stats").hidden = ["login", "account", "not-found"].includes(route.view);
   const jobs = context.jobs,
     paid = jobs.reduce(
       (s: number, j: any) =>
@@ -562,11 +821,32 @@ function render() {
     )
     .join("");
   document
-    .querySelectorAll("nav button")
-    .forEach((b) =>
-      b.classList.toggle("active", (b as HTMLElement).dataset.view === view)
-    );
+    .querySelectorAll<HTMLAnchorElement>("nav a[data-view]")
+    .forEach((b) => {
+      const active =
+        route.view !== "not-found" &&
+        (b.dataset.view === view ||
+          (b.dataset.view === "workspace" && view === "projects"));
+      b.classList.toggle("active", active);
+      if (active) b.setAttribute("aria-current", "page");
+      else b.removeAttribute("aria-current");
+      if (b.dataset.view === "workspace") {
+        b.href = "/projects";
+      }
+    });
   const titles: any = {
+    login: [
+      "Your identity. Your work.",
+      "Sign in to coordinate projects, hire agents and track accepted work.",
+    ],
+    account: [
+      "Your account.",
+      "Manage your signed-in identity and access to the work network.",
+    ],
+    projects: [
+      "Your projects. One shared view.",
+      "Open a project to track its agents, dependencies, results and payments.",
+    ],
     network: [
       "Private work. Resilient context.",
       "Manage your encryption keys and check the relay that holds your shared history.",
@@ -596,7 +876,158 @@ function render() {
     market: "Task market",
     agents: "Agent directory",
     activity: "Event stream",
+    projects: "Projects",
+    login: "Sign in",
+    account: "Account",
   }[view]!;
+  document.title = $("header-title").textContent + " · ctrl-mesh";
+  if (route.view === "not-found") {
+    renderUnavailable(
+      "Page not found",
+      "Check the link or open your workspace."
+    );
+    return;
+  }
+  if (view === "login") {
+    const providers = walletProviders();
+    $(
+      "content"
+    ).innerHTML = `<div class="auth-layout"><section class="panel auth-card"><span class="badge">SOLANA WALLET</span><h2>Sign in to ctrl-mesh</h2><p>Choose your wallet and approve the sign-in message. Your wallet remains in control of every transaction.</p><div class="auth-actions">${
+      providers.length
+        ? providers
+            .map((p) =>
+              button(
+                "login-wallet",
+                "Continue with " + escape(p.name),
+                p.id,
+                "primary"
+              )
+            )
+            .join("")
+        : '<p class="notice">No Solana wallet was detected in this browser. Install Phantom or open this page in your wallet browser, then refresh.</p><a class="button" href="https://phantom.com/" target="_blank" rel="noopener noreferrer">Get Phantom ↗</a>'
+    }</div><p id="auth-error" role="alert"></p><p class="tiny muted">A signed message verifies wallet ownership. Signing in costs no SOL. Your session lasts up to 8 hours.</p>${routeLink(
+      "/market",
+      "Browse public tasks →",
+      "task-link"
+    )}${logoutPending ? button("logout", "Retry sign out") : ""}</section>${
+      demo
+        ? `<section class="panel demo-card"><span class="badge">LOCAL DEMO</span><h2>Explore the agent workflow</h2><p>Try the owner, coordinator, reviewer and contributor roles with test identities and local test SOL.</p>${button(
+            "enter-demo",
+            "Enter demo workspace"
+          )}<p class="tiny muted">Demo identities are shared sandbox keys. Use wallet sign-in for your own identity.</p></section>`
+        : ""
+    }</div>`;
+    $("content")
+      .querySelectorAll<HTMLButtonElement>(
+        'button[data-action="login-wallet"], button[data-action="enter-demo"]'
+      )
+      .forEach((b) => (b.disabled = authBusy));
+    if (authBusy) $("auth-error").textContent = "Completing sign-in…";
+    return;
+  }
+  if (view === "account") {
+    $(
+      "content"
+    ).innerHTML = `<div class="split"><section class="panel"><span class="badge">${
+      role ? "DEMO IDENTITY" : "SIGNED IN"
+    }</span><h2>${
+      role
+        ? escape(actors.find((a) => a.id === role)?.name || role)
+        : "Solana wallet"
+    }</h2><p class="hash">${escape(key)}</p><p>${
+      role
+        ? "This is an explicitly selected local demo role."
+        : "Session expires " +
+          escape(new Date(session!.expires).toLocaleString())
+    }</p><div class="actions">${button(
+      "logout",
+      role ? "Leave demo" : "Sign out"
+    )}${routeLink(
+      "/network",
+      "Privacy & encryption"
+    )}</div></section><section class="panel"><h2>Your access</h2><p>${
+      context.projects.length
+    } projects · ${
+      context.jobs.length
+    } accessible tasks</p><p>Project owners set coordinator budgets. Contributors see their assigned work, and reviewers approve results before payment.</p>${routeLink(
+      "/projects",
+      "Open projects →"
+    )}</section></div>`;
+    return;
+  }
+  if (view === "projects") {
+    const ids = [
+      ...new Set<string>([
+        ...context.projects.map((p: any) => p.id),
+        ...jobs.map((j: any) => j.project),
+      ]),
+    ];
+    $("content").innerHTML =
+      `<div class="section-head"><h2>Accessible projects <span class="badge">${ids.length}</span></h2></div>` +
+      (ids.length
+        ? `<div class="grid">${ids
+            .map((id) => {
+              const p = context.projects.find((p: any) => p.id === id),
+                tasks = jobs.filter((j: any) => j.project === id);
+              return `<article class="card"><div class="card-top">${badge(
+                p?.closed ? "epoch closed" : "project live"
+              )}<span class="meta">${
+                tasks.length
+              } tasks</span></div><h3>${routeLink(
+                projectPath(id),
+                escape(p?.title || id),
+                "task-link"
+              )}</h3><p>${escape(
+                p?.brief || "Your assigned tasks and their shared context."
+              )}</p><div class="card-bottom"><span class="meta">${
+                p
+                  ? p.owner === key
+                    ? "Project owner"
+                    : p.manager === key
+                    ? "Coordinator"
+                    : "Reviewer"
+                  : "Contributor"
+              }</span>${routeLink(
+                projectPath(id),
+                "Open project →"
+              )}</div></article>`;
+            })
+            .join("")}</div>`
+        : `<div class="empty"><h2>Your workspace is ready.</h2><p>Create a project or find a funded task in the market.</p>${button(
+            "new-project",
+            "Create a project",
+            "",
+            "primary"
+          )} ${routeLink("/market", "Browse tasks")}</div>`);
+    return;
+  }
+  if (route.agent) {
+    const a = market.agents.find((a: any) => a.key === route.agent);
+    if (!a)
+      return renderUnavailable(
+        "Agent not found",
+        "This identity has not registered an agent profile."
+      );
+    document.title = a.name + " · ctrl-mesh";
+    $("title").textContent = a.name;
+    $("content").innerHTML = `${routeLink(
+      "/agents",
+      "← Agent directory"
+    )}<section class="panel agent-profile"><span class="badge">Ownership signed</span><h2>${escape(
+      a.name
+    )}</h2><p class="detail-brief">${escape(
+      a.description
+    )}</p><div class="tags">${a.skills
+      .map((s: string) => `<span class="tag">${escape(s)}</span>`)
+      .join("")}</div><p>Indicative rate ${sol(
+      a.rate
+    )} SOL</p><h3>Agent identity</h3><p class="hash">${escape(
+      a.key
+    )}</p><h3>Payment recipient / owner</h3><p class="hash">${escape(
+      a.owner
+    )}</p>${routeLink("/market", "Browse funded tasks →")}</section>`;
+    return;
+  }
   if (selectedJob) {
     renderDetail();
     return;
@@ -661,7 +1092,20 @@ function render() {
   }
   if (view === "workspace") {
     const p = pCurrent(),
-      visible = p ? jobs.filter((j: any) => j.project === p.id) : jobs;
+      visible = route.project
+        ? jobs.filter((j: any) => j.project === route.project)
+        : jobs;
+    if (route.project && !p && !visible.length) {
+      renderUnavailable(
+        "Project unavailable",
+        "This project does not exist or your current identity cannot access it. Connect the correct identity to open this link."
+      );
+      return;
+    }
+    if (p) {
+      localStorage.setItem("mesh-project", p.id);
+      document.title = p.title + " · ctrl-mesh";
+    }
     $("content").innerHTML =
       (p
         ? `<section class="project-summary"><div><div class="toolbar">${badge(
@@ -703,9 +1147,9 @@ function render() {
             .map((j: any) => jobCard(j))
             .join("")}</div>`
         : `<div class="empty"><h2>${
-            token ? "Your workspace is ready." : "Connect to your work network."
+            key ? "Your workspace is ready." : "Connect to your work network."
           }</h2><p>${
-            token
+            key
               ? "Create a project, delegate a budget to your coordinator, and invite independent agents to contribute."
               : "Browse the task market, or connect a wallet to create projects and publish signed actions."
           }</p>${button(
@@ -718,9 +1162,7 @@ function render() {
     const select = $("project-selector") as HTMLSelectElement | null;
     if (select)
       select.onchange = () => {
-        projectId = select.value;
-        localStorage.setItem("mesh-project", projectId);
-        render();
+        navigate(projectPath(select.value));
       };
   } else if (view === "market")
     $("content").innerHTML =
@@ -741,7 +1183,11 @@ function render() {
         (a: any) =>
           `<article class="card"><div class="agent-row"><div class="avatar">${escape(
             a.name.slice(0, 2).toUpperCase()
-          )}</div><div><strong>${escape(a.name)}</strong><small>Owner ${escape(
+          )}</div><div><strong>${routeLink(
+            agentPath(a.key),
+            escape(a.name),
+            "task-link"
+          )}</strong><small>Owner ${escape(
             short(a.owner)
           )}</small></div></div><p class="detail-brief">${escape(
             a.description
@@ -753,7 +1199,7 @@ function render() {
             a.rate
           )} SOL</span><span class="badge">Ownership signed</span></div><p class="hash">${escape(
             a.key
-          )}</p></article>`
+          )}</p>${routeLink(agentPath(a.key), "View agent →")}</article>`
       )
       .join("")}</div>`;
   else
@@ -808,11 +1254,11 @@ function dependencyGraph(jobs: any[]) {
     .join("")}${jobs
     .map((j) => {
       const pos = positions.get(j.id)!;
-      return `<g data-action="open" data-job="${escape(
-        j.id
-      )}" role="button" tabindex="0" aria-label="${escape(j.title)}"><rect x="${
-        pos.x
-      }" y="${pos.y}" width="215" height="68" rx="6" fill="${
+      return `<a href="${escape(
+        taskPath(j.project, j.id)
+      )}" data-route aria-label="${escape(j.title)}"><g><rect x="${pos.x}" y="${
+        pos.y
+      }" width="215" height="68" rx="6" fill="${
         j.state === "accepted" ? "#e4f5d9" : "#f6f7f2"
       }" stroke="#c8d1bb"/><text x="${pos.x + 13}" y="${
         pos.y + 25
@@ -822,7 +1268,7 @@ function dependencyGraph(jobs: any[]) {
         pos.y + 48
       }" fill="#6a785b" font-size="10">${escape(j.state.toUpperCase())} · REV ${
         j.revision
-      }</text></g>`;
+      }</text></g></a>`;
     })
     .join("")}</svg></div></section>`;
 }
@@ -847,7 +1293,11 @@ function renderEvent(e: any) {
   )}${
     c.job
       ? " · " +
-        escape(context.jobs.find((j: any) => j.id === c.job)?.title || c.job)
+        routeLink(
+          taskPath(c.project, c.job),
+          escape(context.jobs.find((j: any) => j.id === c.job)?.title || c.job),
+          "task-link"
+        )
       : ""
   }${
     privateText
@@ -863,13 +1313,56 @@ function renderEvent(e: any) {
       : ""
   }</div></div>${badge(e.receipt.commitment || "signed")}</div>`;
 }
+function renderUnavailable(title: string, message: string) {
+  document.title = title + " · ctrl-mesh";
+  $("header-title").textContent = title;
+  $("content").innerHTML = `<section class="empty"><h2>${escape(
+    title
+  )}</h2><p>${escape(message)}</p>${routeLink(
+    "/",
+    "Open workspace"
+  )}</section>`;
+}
 function renderDetail() {
-  const j = context.jobs.find((j: any) => j.id === selectedJob);
+  const j = context.jobs.find(
+    (j: any) => j.id === selectedJob && j.project === route.project
+  );
   if (!j) {
-    selectedJob = "";
-    render();
+    const listing = market.jobs.find(
+      (j: any) => j.id === selectedJob && j.project === route.project
+    );
+    if (listing) {
+      document.title = listing.title + " · ctrl-mesh";
+      $("header-title").textContent = listing.title;
+      $("content").innerHTML = `${routeLink(
+        sectionPaths.market,
+        "← Task market"
+      )}<h2 class="detail-title">${escape(
+        listing.title
+      )}</h2><section class="panel"><h3>Public task brief</h3><p class="detail-brief">${escape(
+        listing.brief
+      )}</p><div class="tags">${listing.skills
+        .map((s: string) => `<span class="tag">${escape(s)}</span>`)
+        .join("")}</div><p>Funded budget: ${sol(
+        listing.budget
+      )} SOL</p><p class="muted">Contribution details and private history are available to authorized participants.</p>${button(
+        "offer",
+        "Make an offer ↗",
+        listing.id,
+        "primary"
+      )}</section>`;
+    } else if (!key) {
+      loginRequired();
+      render();
+    } else
+      renderUnavailable(
+        "Task unavailable",
+        "This task does not exist or your current identity cannot access it. Connect the correct identity to open this link."
+      );
     return;
   }
+  document.title = j.title + " · ctrl-mesh";
+  $("header-title").textContent = j.title;
   const p = context.projects.find((p: any) => p.id === j.project),
     mine = j.members.find((m: any) => m.worker === key),
     isReviewer = p?.reviewer === key,
@@ -877,8 +1370,8 @@ function renderDetail() {
       (o: any) =>
         o.job === j.id && !j.members.some((m: any) => m.worker === o.worker)
     );
-  $("content").innerHTML = `${button(
-    "back",
+  $("content").innerHTML = `${routeLink(
+    projectPath(j.project),
     "← All tasks"
   )}<h2 class="detail-title">${escape(
     j.title
@@ -907,7 +1400,10 @@ function renderDetail() {
   )}</p><div class="tags">${j.dependencies
     .map((id: string) => {
       const dep = context.jobs.find((x: any) => x.id === id);
-      return button("open", "↳ " + escape(dep?.title || id), id);
+      return routeLink(
+        taskPath(dep?.project || j.project, id),
+        "↳ " + escape(dep?.title || id)
+      );
     })
     .join("")}</div><div class="actions">${
     mine && !["accepted", "cancelled"].includes(j.state)
@@ -1038,6 +1534,33 @@ function renderDetail() {
   }</div></section></div></div>`;
 }
 async function action(name: string, id: string) {
+  if (name === "login-wallet" || name === "enter-demo") {
+    if (authBusy) return;
+    authBusy = true;
+    render();
+    try {
+      if (name === "login-wallet") await loginWallet(id);
+      else await enterDemo();
+    } finally {
+      authBusy = false;
+      if (route.view === "login") render();
+    }
+    return;
+  }
+  if (name === "logout") return logout();
+  if (!key) {
+    const listing =
+      name === "offer" && market.jobs.find((j: any) => j.id === id);
+    navigate(
+      "/login?next=" +
+        encodeURIComponent(
+          listing
+            ? taskPath(listing.project, listing.id)
+            : safeReturnPath(location.pathname + location.search)
+        )
+    );
+    return;
+  }
   const job = context.jobs.find((j: any) => j.id === id),
     p = pCurrent(),
     now = Math.floor(Date.now() / 1000);
@@ -1155,14 +1678,11 @@ async function action(name: string, id: string) {
     );
   }
   if (name === "open") {
-    selectedJob = id;
-    view = "workspace";
-    render();
+    if (job) navigate(taskPath(job.project, job.id));
     return;
   }
   if (name === "back") {
-    selectedJob = "";
-    render();
+    navigate(route.project ? projectPath(route.project) : "/");
     return;
   }
   if (name === "new-project") {
@@ -1185,15 +1705,15 @@ async function action(name: string, id: string) {
         ],
         async (v) => {
           const r = await api("demo/run", { action: "seed", ...v });
-          projectId = r.project;
           role = "owner";
           ($("actor") as HTMLSelectElement).value = role;
           await authenticate();
+          navigate(projectPath(r.project));
           toast("Project funded · Atlas can delegate up to 0.15 SOL");
         },
         "Fund sandbox project · 0.25 SOL"
       );
-    if (!wallet) throw Error("Connect your wallet first");
+    await ensureWallet();
     return form(
       "Create project",
       [
@@ -1213,10 +1733,10 @@ async function action(name: string, id: string) {
         },
       ],
       async (v) => {
-        projectId = "project-" + Date.now();
+        const createdProject = "project-" + Date.now();
         await publish({
           action: "project.create",
-          project: projectId,
+          project: createdProject,
           title: v.title,
           brief: v.brief,
           manager: v.manager,
@@ -1225,6 +1745,7 @@ async function action(name: string, id: string) {
           allowance: Math.round(Number(v.allowance) * 1e9),
           expires: now + 86400,
         });
+        navigate(projectPath(createdProject));
       }
     );
   }
@@ -1263,11 +1784,12 @@ async function action(name: string, id: string) {
           ],
         },
       ],
-      async (v) =>
-        publish({
+      async (v) => {
+        const createdJob = p.id + "-" + Date.now();
+        await publish({
           action: "job.open",
           project: p.id,
-          job: p.id + "-" + Date.now(),
+          job: createdJob,
           title: v.title,
           brief: v.brief,
           skills: v.skills
@@ -1281,7 +1803,9 @@ async function action(name: string, id: string) {
             .map((s: string) => s.trim())
             .filter(Boolean),
           public: v.visibility === "public",
-        })
+        });
+        navigate(taskPath(p.id, createdJob));
+      }
     );
   if (name === "offer") {
     const listing = market.jobs.find((j: any) => j.id === id);
@@ -1590,7 +2114,7 @@ async function action(name: string, id: string) {
         })
     );
   if (name === "register") {
-    if (!wallet && !role) throw Error("Connect as the agent owner");
+    if (!role) await ensureWallet();
     return form(
       "Register an agent",
       [
@@ -1639,8 +2163,11 @@ async function action(name: string, id: string) {
   }
   if (name === "export") {
     const res = await fetch(activeRelay + "/api/export", {
-      headers: { Authorization: "Bearer " + token },
+      headers: token ? { Authorization: "Bearer " + token } : {},
+      credentials: "include",
     });
+    if (!res.ok)
+      throw Error("Could not export events. Check your session and retry.");
     const blob = await res.blob(),
       url = URL.createObjectURL(blob),
       a = document.createElement("a");
@@ -1681,48 +2208,39 @@ $("content").onclick = async (e) => {
   try {
     await action(target.dataset.action!, target.dataset.job || "");
   } catch (e) {
-    toast((e as Error).message);
+    if ($("auth-error")) $("auth-error").textContent = (e as Error).message;
+    else toast((e as Error).message);
   } finally {
     target.disabled = false;
   }
 };
-document.querySelectorAll("nav button").forEach((b) =>
-  b.addEventListener("click", () => {
-    view = (b as HTMLElement).dataset.view!;
-    selectedJob = "";
-    render();
-  })
-);
 $("new-project").onclick = () =>
   action("new-project", "").catch((e) => toast(e.message));
 $("actor").onchange = async () => {
-  role = ($("actor") as HTMLSelectElement).value;
-  wallet = null;
-  localStorage.setItem("mesh-role", role);
-  selectedJob = "";
+  const chosen = ($("actor") as HTMLSelectElement).value;
+  if (!chosen) return logout().catch((e) => toast(e.message));
+  clearIdentity();
+  bindWallet(null);
+  role = chosen;
+  sessionStorage.setItem("mesh-demo-role", role);
+  // Preserve the address while changing identity so authorized users can open
+  // a shared link after connecting, and other identities see the access state.
   await authenticate().catch((e) => toast(e.message));
 };
-$("wallet").onclick = async () => {
-  try {
-    wallet = (window as any).solana;
-    if (!wallet)
-      throw Error(
-        "Install a Solana wallet browser extension, or use sandbox roles locally."
+$("wallet").onclick = () =>
+  key
+    ? navigate("/account")
+    : route.view === "login"
+    ? render()
+    : navigate(
+        "/login?next=" +
+          encodeURIComponent(
+            safeReturnPath(location.pathname + location.search)
+          )
       );
-    await wallet.connect();
-    key = wallet.publicKey.toBase58();
-    role = "";
-    ($("actor") as HTMLSelectElement).value = "";
-    await authenticate();
-    toast("Wallet connected · " + short(key));
-  } catch (e) {
-    toast((e as Error).message);
-  }
-};
-(async () => {
+async function initialize() {
   health = await api("health");
   demo = health.demo;
-  $("sandbox-note").hidden = !demo;
   if (demo) {
     actors = await api("demo/actors");
     $("actor").innerHTML =
@@ -1742,4 +2260,25 @@ $("wallet").onclick = async () => {
     document.querySelector('label[for="actor"]')!.setAttribute("hidden", "");
   }
   await authenticate();
-})().catch((e) => toast(e.message));
+}
+(async () => {
+  const until = Date.now() + 30000;
+  for (;;) {
+    try {
+      await initialize();
+      return;
+    } catch (e) {
+      if (!retryable(e) || Date.now() >= until) throw e;
+      $("connection").textContent = "Choosing a coordinator…";
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
+  }
+})().catch((e) => {
+  $("connection").textContent = "Connection unavailable";
+  $(
+    "content"
+  ).innerHTML = `<section class="empty"><h2>Could not load the workspace</h2><p>${escape(
+    e.message
+  )}</p><button class="button" id="retry-start">Retry connection</button></section>`;
+  $("retry-start").onclick = () => location.reload();
+});

@@ -39,6 +39,21 @@ export class Engine extends EventEmitter {
   /** Only committed consensus actions reach the application journal or outbox. */
   applyConsensus(action: Action) {
     if (action.type === "barrier") return;
+    if (action.type === "session.create") {
+      this.store.saveBrowserSession(
+        action.hash,
+        action.actor,
+        action.expires,
+        action.previous
+      );
+      if (action.previous) this.emit("session.revoked", action.previous);
+      return;
+    }
+    if (action.type === "session.revoke") {
+      this.store.revokeBrowserSession(action.hash);
+      this.emit("session.revoked", action.hash);
+      return;
+    }
     if (action.type === "failed") {
       this.store.fail(action.id);
       return;
@@ -62,6 +77,16 @@ export class Engine extends EventEmitter {
   }
   async readBarrier() {
     await this.consensus?.barrier();
+  }
+  async recordSession(
+    action: Extract<Action, { type: "session.create" | "session.revoke" }>
+  ) {
+    if (this.readOnly) throw Error("Sign in through the coordinator relay");
+    return this.serial(async () => {
+      const term = await this.consensus?.barrier();
+      if (this.consensus) await this.consensus.propose(action, term);
+      else this.applyConsensus(action);
+    });
   }
   private async record(event: MeshEvent, receipt: any, term?: number) {
     if (!this.consensus) return this.append(event, receipt);

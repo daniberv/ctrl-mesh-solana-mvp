@@ -5,6 +5,8 @@ import { WebSocketServer, WebSocket } from "ws";
 import { Engine } from "./engine";
 import { address, Entry, verifyEvent } from "./events";
 import { Federation } from "./federation";
+import { parseRoute } from "../routes";
+import { BrowserAuth } from "./browser-auth";
 export type DemoControl = {
   actors: () => any;
   run: (action: string, input: any) => Promise<any>;
@@ -16,6 +18,7 @@ export function createRelay(
     host?: string;
     demo?: DemoControl;
     federation?: Federation;
+    publicOrigin?: string;
   }
 ) {
   const rates = new Map<string, { count: number; until: number }>();
@@ -27,12 +30,29 @@ export function createRelay(
     rates.set(actor, bucket);
   };
   const challenges = new Map<string, number>();
+  const browserAuth = new BrowserAuth(engine);
+  const allowedOrigins = (req: IncomingMessage) => [
+    options.publicOrigin || `http://${req.headers.host}`,
+    ...(engine.consensus?.options.config.members.map(
+      (m) => new URL(m.url).origin
+    ) || []),
+  ];
+  const browserOrigin = (req: IncomingMessage) => {
+    const origin = req.headers.origin;
+    if (!origin || !allowedOrigins(req).includes(origin))
+      throw Object.assign(Error("Browser origin required"), { status: 403 });
+    return origin;
+  };
   const sessions = new Map<string, { actor: string; expires: number }>();
   const actorFor = (token: string) => {
     const s = sessions.get(token);
     if (!s || s.expires < Date.now()) throw Error("Authentication required");
     return s.actor;
   };
+  const requestActor = (req: IncomingMessage) =>
+    req.headers.authorization
+      ? actorFor(req.headers.authorization.replace(/^Bearer /, ""))
+      : browserAuth.actor(req);
   const json = (res: ServerResponse, status: number, value: any) => {
     res.writeHead(status, {
       "Content-Type": "application/json",
@@ -62,9 +82,13 @@ export function createRelay(
         engine.consensus?.options.config.members.map(
           (m) => new URL(m.url).origin
         ) || [];
-      if (req.headers.origin && peerOrigins.includes(req.headers.origin)) {
+      if (
+        req.headers.origin &&
+        allowedOrigins(req).includes(req.headers.origin)
+      ) {
         res.setHeader("Access-Control-Allow-Origin", req.headers.origin);
         res.setHeader("Vary", "Origin");
+        res.setHeader("Access-Control-Allow-Credentials", "true");
         res.setHeader(
           "Access-Control-Allow-Headers",
           "Content-Type, Authorization"
@@ -75,8 +99,32 @@ export function createRelay(
           res.end();
           return;
         }
-      } else if (req.headers.origin && req.headers.origin !== `http://${host}`)
+      } else if (req.headers.origin)
         return json(res, 403, { error: "Cross-origin requests disabled" });
+      if (path === "/api/session" && req.method === "GET") {
+        await engine.readBarrier();
+        return json(res, 200, { session: browserAuth.session(req) || null });
+      }
+      if (path.startsWith("/api/session/") && req.method === "POST") {
+        const origin = browserOrigin(req);
+        limit("login:" + req.socket.remoteAddress);
+        const input = await body(req, 4096);
+        if (path === "/api/session/challenge")
+          return json(
+            res,
+            200,
+            await browserAuth.challenge(req, res, input, origin)
+          );
+        if (path === "/api/session/login")
+          return json(
+            res,
+            200,
+            await browserAuth.login(req, res, input, origin)
+          );
+        if (path === "/api/session/logout")
+          return json(res, 200, await browserAuth.logout(req, res, origin));
+        return json(res, 404, { error: "Not found" });
+      }
       if (path === "/api/ha/rpc" && req.method === "POST" && engine.consensus) {
         engine.consensus.authorize(
           (req.headers.authorization || "").replace(/^Bearer /, "")
@@ -158,10 +206,12 @@ export function createRelay(
         return json(res, 200, await options.demo.run(data.action, data));
       }
       if (path.startsWith("/api/")) {
-        const actor = actorFor(
-          (req.headers.authorization || "").replace(/^Bearer /, "")
-        );
         if (req.method === "GET") await engine.readBarrier();
+        // Cookie-authenticated mutations require an allowed Origin, in addition
+        // to each command's existing wallet signature and role checks.
+        if (req.method === "POST" && !req.headers.authorization)
+          browserOrigin(req);
+        const actor = requestActor(req);
         if (path === "/api/context" && req.method === "GET") {
           const query = new URL(req.url!, "http://localhost").searchParams;
           const snapshot = engine.state.context(actor);
@@ -253,10 +303,19 @@ export function createRelay(
         res.end();
         return;
       }
-      if (req.method === "GET" && files[path]) {
-        const [file, mime] = files[path];
-        res.writeHead(200, {
+      const appRoute = parseRoute(path).view !== "not-found";
+      const missingPage =
+        !files[path] &&
+        !appRoute &&
+        (req.headers.accept || "").includes("text/html");
+      const asset =
+        files[path] ||
+        (appRoute || missingPage ? ["web/index.html", "text/html"] : undefined);
+      if ((req.method === "GET" || req.method === "HEAD") && asset) {
+        const [file, mime] = asset;
+        res.writeHead(missingPage ? 404 : 200, {
           "Content-Type": mime + "; charset=utf-8",
+          "Cache-Control": "no-cache",
           "Content-Security-Policy":
             "default-src 'self'; connect-src 'self' ws://127.0.0.1:* ws://localhost:* " +
             peerOrigins
@@ -264,7 +323,7 @@ export function createRelay(
               .join(" ") +
             "; style-src 'self'; script-src 'self'; frame-ancestors 'none'",
         });
-        res.end(readFileSync(file));
+        res.end(req.method === "HEAD" ? undefined : readFileSync(file));
         return;
       }
       json(res, 404, { error: "Not found" });
@@ -293,10 +352,25 @@ export function createRelay(
         socket.close(1012, "Coordinator changed; reconnect with cursor");
   };
   engine.consensus?.on("change", leadership);
-  wss.on("connection", (socket) => {
+  wss.on("connection", (socket, req) => {
+    if (
+      req.headers.origin &&
+      !allowedOrigins(req).includes(req.headers.origin)
+    ) {
+      socket.close(4003, "Origin is not allowed");
+      return;
+    }
     let alive = true;
     socket.on("pong", () => (alive = true));
     const heartbeat = setInterval(() => {
+      if (actor) {
+        try {
+          authenticatedActor();
+        } catch {
+          socket.close(4001, "Session expired");
+          return;
+        }
+      }
       if (!alive) {
         socket.terminate();
         return;
@@ -307,6 +381,13 @@ export function createRelay(
 
     let actor = "";
     let token = "";
+    const authenticatedActor = () =>
+      token ? actorFor(token) : (browserOrigin(req), browserAuth.actor(req));
+    const revoked = (hash: string) => {
+      if (!token && browserAuth.sessionHash(req) === hash)
+        socket.close(4001, "Session ended");
+    };
+    engine.on("session.revoked", revoked);
     const subscriptions = new Map<string, any>();
     const send = (frame: any[]) => {
       if (socket.readyState === WebSocket.OPEN) {
@@ -334,7 +415,7 @@ export function createRelay(
     };
     const deliver = (entry: Entry) => {
       try {
-        actorFor(token);
+        authenticatedActor();
       } catch {
         socket.close(4001, "Session expired");
         return;
@@ -352,6 +433,11 @@ export function createRelay(
           ]);
     };
     const chain = (status: any) => {
+      try {
+        authenticatedActor();
+      } catch {
+        return;
+      }
       if (
         status.job &&
         engine.state.jobs[status.job] &&
@@ -365,12 +451,15 @@ export function createRelay(
       try {
         const [type, id, ...filters] = JSON.parse(data.toString());
         if (type === "AUTH") {
+          if (typeof id !== "string")
+            throw Error("Invalid authentication frame");
           token = id;
-          actor = actorFor(token);
+          await engine.readBarrier();
+          actor = authenticatedActor();
           send(["OK", "AUTH", true]);
           return;
         }
-        actorFor(token);
+        actor = authenticatedActor();
         if (type === "REQ") {
           await engine.readBarrier();
           if (subscriptions.size >= 20 && !subscriptions.has(id))
@@ -437,6 +526,7 @@ export function createRelay(
       clearInterval(heartbeat);
       engine.off("event", deliver);
       engine.off("chain", chain);
+      engine.off("session.revoked", revoked);
     });
   });
   return {

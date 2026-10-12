@@ -21,6 +21,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS cursors(name TEXT PRIMARY KEY,seq INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS journal(seq INTEGER PRIMARY KEY,hash TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS browser_sessions(hash TEXT PRIMARY KEY,actor TEXT NOT NULL,expires INTEGER NOT NULL,revoked INTEGER NOT NULL DEFAULT 0);
     `);
     if (!this.meta("stream")) this.setMeta("stream", randomUUID());
     // Backfill existing journals without changing events or their sequence numbers.
@@ -51,6 +52,41 @@ export class Store {
     return (
       this.db.prepare("SELECT value FROM metadata WHERE key=?").get(key) as any
     )?.value;
+  }
+  browserSession(hash: string): { actor: string; expires: number } | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT actor,expires,revoked FROM browser_sessions WHERE hash=?"
+      )
+      .get(hash) as any;
+    return row && !row.revoked && row.expires > Date.now()
+      ? { actor: row.actor, expires: row.expires }
+      : undefined;
+  }
+  saveBrowserSession(
+    hash: string,
+    actor: string,
+    expires: number,
+    previous?: string
+  ) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare(
+          "INSERT OR IGNORE INTO browser_sessions(hash,actor,expires) VALUES(?,?,?)"
+        )
+        .run(hash, actor, expires);
+      if (previous) this.revokeBrowserSession(previous);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+  revokeBrowserSession(hash: string) {
+    this.db
+      .prepare("UPDATE browser_sessions SET revoked=1 WHERE hash=?")
+      .run(hash);
   }
   setMeta(key: string, value: string) {
     this.db

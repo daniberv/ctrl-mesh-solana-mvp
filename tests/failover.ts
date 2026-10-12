@@ -420,4 +420,58 @@ describe("automatic writable failover", function () {
     );
     assert(result.seq > before);
   });
+
+  it("keeps browser sessions and logout revocation across coordinator failure", async () => {
+    const origin = config.members[0].url;
+    const request = (path: string, input?: any, cookie = "") =>
+      fetch(config.members[index()].url + "/api/" + path, {
+        method: input === undefined ? "GET" : "POST",
+        headers: {
+          Origin: origin,
+          Cookie: cookie,
+          "Content-Type": "application/json",
+        },
+        body: input === undefined ? undefined : JSON.stringify(input),
+      });
+    const challenge = await request("session/challenge", {
+      actor: owner.publicKey.toBase58(),
+    });
+    const c = await challenge.json();
+    const login = await request(
+      "session/login",
+      {
+        nonce: c.nonce,
+        signature: Buffer.from(
+          nacl.sign.detached(Buffer.from(c.message), owner.secretKey)
+        ).toString("hex"),
+      },
+      challenge.headers.getSetCookie()[0].split(";")[0]
+    );
+    assert.equal(login.status, 200);
+    const cookie = login.headers.getSetCookie()[0].split(";")[0];
+    const first = index();
+    await stop(first);
+    await until(() => !!leader(), "No replacement for browser session");
+    const context = await request("context", undefined, cookie);
+    assert.equal(context.status, 200);
+    assert((await context.json()).projects.some((p: any) => p.id === project));
+    assert.equal(
+      (await (await request("session", undefined, cookie)).json()).session
+        .actor,
+      owner.publicKey.toBase58()
+    );
+    await start(first);
+    await sync();
+    assert.equal((await request("session/logout", {}, cookie)).status, 200);
+    const second = index();
+    await stop(second);
+    await until(() => !!leader(), "No replacement after logout");
+    assert.equal((await request("context", undefined, cookie)).status, 401);
+    assert.equal(
+      (await (await request("session", undefined, cookie)).json()).session,
+      null
+    );
+    await start(second);
+    await sync();
+  });
 });

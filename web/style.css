@@ -16,6 +16,47 @@
 * {
   box-sizing: border-box;
 }
+[hidden] {
+  display: none !important;
+}
+.auth-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+  max-width: 1000px;
+}
+.auth-card,
+.demo-card {
+  padding: 32px;
+}
+.auth-card h2,
+.demo-card h2 {
+  margin-top: 20px;
+}
+.auth-actions {
+  display: grid;
+  gap: 12px;
+  margin: 24px 0;
+}
+.demo-card {
+  background: #edf2e5;
+}
+.agent-profile {
+  margin-top: 24px;
+  max-width: 850px;
+}
+#auth-error {
+  color: var(--red);
+}
+.identity {
+  flex-wrap: wrap;
+}
+@media (max-width: 760px) {
+  .auth-layout {
+    grid-template-columns: 1fr;
+  }
+}
 body {
   margin: 0;
 }
@@ -38,6 +79,12 @@ button:disabled {
 }
 a {
   color: inherit;
+}
+.task-link {
+  text-decoration: none;
+}
+.task-link:hover {
+  text-decoration: underline;
 }
 aside {
   position: fixed;
@@ -70,7 +117,7 @@ nav {
   display: grid;
   gap: 8px;
 }
-nav button {
+nav a {
   border: 0;
   border-radius: 7px;
   background: transparent;
@@ -79,12 +126,13 @@ nav button {
   padding: 15px 13px;
   display: flex;
   gap: 15px;
+  text-decoration: none;
 }
-nav button.active {
+nav a.active {
   background: #354030;
   color: var(--lime);
 }
-nav button:hover {
+nav a:hover {
   background: #2b342b;
 }
 .sidebar-bottom {
@@ -185,6 +233,7 @@ h1 {
   line-height: 1.6;
 }
 .button {
+  text-decoration: none;
   padding: 11px 16px;
   border: 1px solid var(--line);
   border-radius: 5px;
@@ -697,7 +746,7 @@ textarea:focus-visible {
     margin-top: 17px;
     overflow: auto;
   }
-  nav button {
+  nav a {
     font-size: 11px;
     padding: 10px;
     gap: 6px;

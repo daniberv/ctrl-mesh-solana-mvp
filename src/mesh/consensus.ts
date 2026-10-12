@@ -5,6 +5,14 @@ import { canonical, digest, MeshEvent, Receipt } from "./events";
 
 export type Action =
   | { type: "barrier" }
+  | {
+      type: "session.create";
+      hash: string;
+      actor: string;
+      expires: number;
+      previous?: string;
+    }
+  | { type: "session.revoke"; hash: string }
   | { type: "intent"; event: MeshEvent; transaction: string; signature: string }
   | { type: "entry"; event: MeshEvent; receipt: Receipt }
   | { type: "failed"; id: string };

@@ -1,6 +1,6 @@
 # Verification record
 
-Latest local verification: **24 tests passed** on October 12, 2026 (46 seconds). TypeScript checks and browser bundle build also passed.
+Latest local verification: **31 test cases verified** on October 12, 2026. The full regression run passed 30 cases and exposed a session replication serialization error; after fixing it, all six failover cases passed, including the new browser-session case. TypeScript checks and browser bundle build also passed.
 
 The integration suite runs against the compiled Anchor program on a real local Solana validator. It uses independently generated owner, coordinator, reviewer, two provider-owner and two worker keys, and an unauthorized outsider.
 
@@ -29,10 +29,15 @@ Covered behaviors:
 21. Network partition: isolated leader cannot acknowledge updates, majority continues, WebSocket consumers reconnect with the same cursor, and the old node catches up without its uncommitted divergent update.
 22. Primary failure after a payment confirms but before its receipt is appended; replacement recovers the receipt, retries return that same receipt, and exact provider-owner balances prove no second payout.
 23. Loss of majority blocks both mutation acknowledgements and stale private context reads; the same signed event completes once quorum returns.
+24. Deep HTTP routes, encoded identifiers, invalid paths and restricted post-login return URLs.
+25. Browser nonce binding, wallet signature verification, expiry/replay rejection, wrong-origin denial, HttpOnly cookies, persistent and rotated sessions, actor binding, logout and live-subscription revocation.
+26. Wallet session recognition after coordinator failure and persisted logout revocation after another coordinator failure.
 
 The four-process demo separately exercises coordinator/provider/reviewer interaction over HTTP and WebSocket; no worker is passed another worker's private key. Its artifacts are deterministic fixtures, and its reviewer checks signatures, bytes and matching API/client contracts.
 
-Browser checks additionally cover encryption-key publication, an owner-to-reviewer encrypted message decrypted in the reviewer browser, Privacy & network at 1440px/390px, and no plaintext in either live relay database. Browser checks cover project/task views, public marketplace, role switching, task creation through the form, artifact display, dependency graph, responsive layout and browser console errors. The injected-wallet path is implemented but cannot be end-to-end tested here without a browser wallet extension; the same transaction verification code is exercised by the SDK integration suite.
+Browser checks additionally cover encryption-key publication, an owner-to-reviewer encrypted message decrypted in the reviewer browser, Privacy & network at 1440px/390px, and no plaintext in either live relay database. Browser checks cover project/task views, public marketplace, role switching, task creation through the form, artifact display, dependency graph, responsive layout and browser console errors. New checks covered all section URLs, task and agent profile deep links, refresh/back/forward, guest access, explicit demo entry/exit, and wallet sign-in using an ephemeral WebCrypto Ed25519 provider. Rejected signatures left the visitor anonymous; accepted signatures restored the original destination while denying that new identity access to another owner's private task. Actual Phantom/Solflare extensions were not available for this check; transaction verification is exercised by the SDK integration suite.
+
+The browser's authenticated wallet session survived a live **SIGKILL of node a**, automatically resumed its subscription through node c without another signature, and survived a complete page reload after a rejoined. The ephemeral provider was absent after reload, proving cookie-session restoration. Sign out returned the private context API to 401, and browser Back returned protected routes to login. A fresh account page had zero browser console errors before the intentional unauthorized request. Existing work history remained at **41 events**, unchanged.
 
 The live sandbox was migrated with its existing **23 events**, original stream ID, existing Solana accounts and browser encryption keys intact. A backup of the original database was saved before migration. Node `a` was then stopped with **SIGKILL** while the browser remained on its original 4173 origin. The loaded browser reauthenticated on node `b` and resumed its workspace automatically. With `a` still down, the four separate demo agent processes created and completed another multi-owner project; each provider owner received **0.015 test SOL**. No private signing key was transferred between agents. This check used real HTTP peer replication and the running local Solana validator, separately from the test harness's deterministic network partitions. Temporary connection errors during the deliberate outage are expected.
 

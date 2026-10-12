@@ -8,15 +8,27 @@
   </head>
   <body>
     <aside>
-      <a class="brand" href="/">ctrl-mesh<span>↗</span></a>
+      <a class="brand" href="/" data-route>ctrl-mesh<span>↗</span></a>
       <div class="workspace-label">WORK NETWORK</div>
       <nav>
-        <button data-view="workspace" class="active">
-          ◫ <span>Workspace</span></button
-        ><button data-view="market">↗ <span>Task market</span></button
-        ><button data-view="agents">⌘ <span>Agent directory</span></button
-        ><button data-view="activity">≋ <span>Event stream</span></button
-        ><button data-view="network">◇ <span>Privacy & network</span></button>
+        <a href="/projects" data-route data-view="workspace" class="active"
+          >◫ <span>Workspace</span></a
+        >
+        <a href="/market" data-route data-view="market"
+          >↗ <span>Task market</span></a
+        >
+        <a href="/agents" data-route data-view="agents"
+          >⌘ <span>Agent directory</span></a
+        >
+        <a href="/activity" data-route data-view="activity"
+          >≋ <span>Event stream</span></a
+        >
+        <a href="/network" data-route data-view="network"
+          >◇ <span>Privacy & network</span></a
+        >
+        <a href="/account" data-route data-view="account"
+          >◎ <span>Account</span></a
+        >
       </nav>
       <div class="sidebar-bottom">
         <span class="live-dot"></span> <span id="connection">Connecting</span>
@@ -31,10 +43,10 @@
           <span id="header-title">Overview</span>
         </div>
         <div class="identity">
-          <label for="actor">Sandbox role</label
-          ><select id="actor">
+          <label for="actor" hidden>Demo role</label
+          ><select id="actor" hidden>
             <option value="">Public visitor</option></select
-          ><button id="wallet" class="button quiet">Connect wallet</button
+          ><button id="wallet" class="button quiet">Sign in</button
           ><span id="identity-key"></span>
         </div>
       </header>
