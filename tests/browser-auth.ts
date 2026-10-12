@@ -1,5 +1,5 @@
 import { strict as assert } from "assert";
-import { mkdtempSync, readFileSync } from "fs";
+import { existsSync, mkdtempSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { Keypair } from "@solana/web3.js";
@@ -32,7 +32,8 @@ describe("email accounts, wallet binding and navigation", function () {
     engine: Engine,
     relay: ReturnType<typeof createRelay>,
     cookie = "",
-    accountId = "";
+    accountId = "",
+    resetMail = false;
   async function request(
     path: string,
     input?: any,
@@ -88,7 +89,10 @@ describe("email accounts, wallet binding and navigation", function () {
   async function start() {
     store = new Store(file);
     engine = new Engine(store, {} as Chain);
-    relay = createRelay(engine, { port: 4221, localMailDir: mail });
+    relay = createRelay(engine, {
+      port: 4221,
+      ...(resetMail ? { localMailDir: mail } : {}),
+    });
     await relay.start();
   }
   async function stop() {
@@ -115,7 +119,6 @@ describe("email accounts, wallet binding and navigation", function () {
       "/login",
       "/register",
       "/forgot-password",
-      "/verify-email",
       "/reset-password",
       projectPath("project /?"),
       taskPath("..", "a/b"),
@@ -125,6 +128,20 @@ describe("email accounts, wallet binding and navigation", function () {
       assert.equal(r.status, 200, path);
       assert.match(r.headers.get("content-type")!, /text\/html/);
     }
+    const retired = await request(
+      "/verify-email?token=old-token&next=%2Fapp%2Fmarket"
+    );
+    assert.equal(retired.status, 302);
+    assert.equal(
+      retired.headers.get("location"),
+      "/login?next=%2Fapp%2Fmarket"
+    );
+    assert.equal(
+      (await request("/verify-email?next=https://evil.test")).headers.get(
+        "location"
+      ),
+      "/login?next=%2Fapp"
+    );
     const old = await request("/projects/p/tasks/t?tab=results");
     assert.equal(old.status, 308);
     assert.equal(
@@ -163,13 +180,13 @@ describe("email accounts, wallet binding and navigation", function () {
     );
     assert.equal(
       (await request("/api/session/local-email", undefined, "")).status,
-      401
+      410
     );
     const client = new MeshClient(url, actor);
     assert.ok(await client.authenticate());
     assert.deepEqual((await client.context()).projects, []);
   });
-  it("registers a normalized email, hashes its password, and gates unverified accounts", async () => {
+  it("registers without mail, hashes the password and requires wallet proof", async () => {
     assert.equal(
       (await post("register", { email, password: "short" })).status,
       400
@@ -196,37 +213,27 @@ describe("email accounts, wallet binding and navigation", function () {
     assert.equal((await request("/api/context")).status, 403);
     assert.equal(
       (await post("challenge", { actor: actor.publicKey.toBase58() })).status,
-      403
+      200
     );
-    const preview = await (await request("/api/session/local-email")).json();
-    assert.equal(preview.mode, "local");
-    assert.equal(preview.message.to, email);
+    assert.equal(existsSync(mail), false);
+    assert.equal(
+      store.db.prepare("SELECT COUNT(*) AS n FROM account_tokens").get()!.n,
+      0
+    );
     assert.equal((await post("register", { email, password })).status, 409);
     assert.equal(
       store.db.prepare("SELECT COUNT(*) AS n FROM accounts").get()!.n,
       1
     );
   });
-  it("confirms email with a one-use expiring link and invalidates superseded links", async () => {
-    const first = new URL(
-      (await (await request("/api/session/local-email")).json()).message.url
-    ).searchParams.get("token");
-    await post("resend");
-    assert.equal((await post("verify", { token: first })).status, 400);
-    const token = new URL(
-      (await (await request("/api/session/local-email")).json()).message.url
-    ).searchParams.get("token");
-    assert.equal((await post("verify", { token })).status, 200);
-    assert.equal((await post("verify", { token })).status, 400);
-    assert.equal(
-      (await (await request("/api/session")).json()).session.account.verified,
-      true
-    );
+  it("retires confirmation endpoints without claiming email ownership", async () => {
+    assert.equal((await post("resend")).status, 410);
+    assert.equal((await post("verify", { token: "old-token" })).status, 410);
+    assert.equal((await request("/api/session/local-email")).status, 410);
+    const state = await (await request("/api/session")).json();
+    assert.equal(state.localMail, false);
+    assert.equal(state.session.account.verified, false);
     assert.equal((await request("/api/context")).status, 403);
-    assert.equal(
-      (await (await request("/api/session/local-email")).json()).message,
-      null
-    );
     assert(!JSON.stringify(engine.state.market()).includes(email));
     assert.equal(store.head(), 0);
   });
@@ -271,6 +278,7 @@ describe("email accounts, wallet binding and navigation", function () {
     const s = (await (await request("/api/session")).json()).session;
     assert.equal(s.actor, actor.publicKey.toBase58());
     assert.equal(s.account.wallet, s.actor);
+    assert.equal(s.account.verified, false);
     const expired = await challenge(),
       realNow = Date.now;
     Date.now = () => realNow() + 121000;
@@ -300,10 +308,6 @@ describe("email accounts, wallet binding and navigation", function () {
       password,
     });
     assert.equal(r.status, 200);
-    const t = new URL(
-      (await (await request("/api/session/local-email")).json()).message.url
-    ).searchParams.get("token");
-    await post("verify", { token: t });
     const c = await challenge();
     assert.equal(
       (
@@ -315,7 +319,7 @@ describe("email accounts, wallet binding and navigation", function () {
       409
     );
     assert.equal(store.accounts.byEmail("second@example.test")!.wallet, null);
-    // Two verified accounts race for a previously unclaimed wallet.
+    // Two accounts race for a previously unclaimed wallet.
     const secondCookie = cookie;
     const third = await post(
       "register",
@@ -323,10 +327,6 @@ describe("email accounts, wallet binding and navigation", function () {
       ""
     );
     assert.equal(third.status, 200);
-    const t3 = new URL(
-      (await (await request("/api/session/local-email")).json()).message.url
-    ).searchParams.get("token");
-    await post("verify", { token: t3 });
     const thirdCookie = cookie,
       a = await challenge(stranger, secondCookie),
       b = await challenge(stranger, thirdCookie);
@@ -410,6 +410,9 @@ describe("email accounts, wallet binding and navigation", function () {
     return ws;
   }
   it("resets a password through a private local outbox and revokes every session and socket", async () => {
+    await stop();
+    resetMail = true;
+    await start();
     const saved = cookie,
       ws = await liveSocket(),
       closed = new Promise<number>((r) => ws.once("close", r));
@@ -420,7 +423,7 @@ describe("email accounts, wallet binding and navigation", function () {
     );
     assert.equal(
       (await request("/api/session/local-email", undefined, "")).status,
-      401
+      410
     );
     const message = JSON.parse(
         readFileSync(join(mail, accountId + "-reset.json"), "utf8")

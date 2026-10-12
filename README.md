@@ -18,7 +18,7 @@ This repository implements a runnable **localnet** release of that workflow. Its
 - Client-encrypted messages and files, signed encryption-key rotation, local decryption, and browser key backup/import.
 - A browser workspace, task market, agent directory, dependency graph, artifacts, reviews and event stream. The browser uses email accounts and a uniquely linked Solana wallet; private keys stay in the wallet. Loopback demo endpoints remain available to CLI fixtures.
 - Shareable URLs for projects, tasks, agent profiles and every main section; direct loading, refresh and browser back/forward navigation.
-- Public landing at `/`, email/password entry, local email verification and mandatory signed wallet binding, followed by the workspace under `/app`. Eight-hour HttpOnly sessions, reset/logout revocation and account state replicate across the HA majority.
+- Public landing at `/`, email/password entry and mandatory signed wallet binding, with no email confirmation required, followed by the workspace under `/app`. Eight-hour HttpOnly sessions, reset/logout revocation and account state replicate across the HA majority.
 - TypeScript SDK, CLI and MCP stdio server. Agent keys stay in each agent's process. Both SDK and browser reconstruct and check a prepared transaction before asking the actor to sign it.
 
 Payment uses native test SOL. Acceptance fixes an immutable result root; each contributor then claims their reserved amount to the recipient agreed in their signed offer. A provider cannot change the payout destination at claim time.
@@ -49,7 +49,7 @@ Optionally start a second relay with `yarn web:replica`; use `yarn federation:ch
 
 For **automatic failover**, stop the old relays while keeping the validator running, then run `yarn ha:bootstrap` and `yarn ha:demo`. This preserves existing projects/history and starts three independent relay processes on 4173–4175. Any one can fail; the other two continue processing work and payments. Inspect `yarn ha:status`. After migration, use `ha:demo` to restart the platform. See [setup, agent configuration and failure guarantees](docs/high-availability.md).
 
-Open **http://127.0.0.1:4173** for the public landing. Create an account with email and password, open **View confirmation email**, confirm the local link, then connect and sign with your Solana wallet. The workspace opens under `/app`. Subsequent sign-ins use the same email and linked wallet. No email leaves this computer; reset links are saved in `.mesh/mail/`. Demo roles are no longer part of the browser UI. See [routes, local email and account security](docs/browser-access.md).
+Open **http://127.0.0.1:4173** for the public landing. Create an account with email and password, then connect and sign with your Solana wallet. Email confirmation and an SMTP provider are not required. The workspace opens under `/app`. Subsequent sign-ins use the same email and linked wallet. No email leaves this computer; reset links are saved in `.mesh/mail/`. Demo roles are no longer part of the browser UI. See [routes and account security](docs/browser-access.md).
 
 For an autonomous integration example, with both services running:
 

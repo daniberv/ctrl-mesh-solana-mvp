@@ -73,7 +73,6 @@ let route = parseRoute(location.pathname),
 let key = "",
   token = "",
   session: AccountSession | null = null,
-  localMail = false,
   health: any = {},
   wallet: any = null,
   context: any = { projects: [], jobs: [], agents: [], offers: [] },
@@ -278,7 +277,6 @@ async function authenticate() {
   token = "";
   const result = await api("session");
   session = result.session;
-  localMail = result.localMail;
   key = session?.actor || "";
   $("identity-key").textContent = short(key);
   startStream();
@@ -715,7 +713,7 @@ function jobCard(j: any, publicOnly = false) {
       : routeLink(taskPath(j.project, j.id), "Open task →")
   }</div></article>`;
 }
-const authViews = ["login", "register", "forgot", "reset", "verify", "connect"];
+const authViews = ["login", "register", "forgot", "reset", "connect"];
 const nextPath = () =>
   safeReturnPath(new URLSearchParams(location.search).get("next"));
 const authPath = (page: string, next = nextPath()) =>
@@ -731,24 +729,20 @@ function guardRoute() {
     const next =
       route.view === "connect" ? nextPath() : safeReturnPath(requested);
     if (!session) move(authPath("/login", next));
-    else if (!session.account.verified) move(authPath("/verify-email", next));
     else if (!session.actor && route.view !== "connect")
       move(authPath("/app/connect-wallet", next));
     else if (session.actor && route.view === "connect") move(next);
   } else if (session && ["login", "register"].includes(route.view)) {
-    move(
-      !session.account.verified
-        ? authPath("/verify-email")
-        : !session.actor
-        ? authPath("/app/connect-wallet")
-        : nextPath()
-    );
-  } else if (
-    session?.account.verified &&
-    route.view === "verify" &&
-    !new URLSearchParams(location.search).get("token")
-  ) {
     move(session.actor ? nextPath() : authPath("/app/connect-wallet"));
+  } else if (route.view === "verify") {
+    // Old bookmarks and browser history skip the retired confirmation screen.
+    move(
+      session
+        ? session.actor
+          ? nextPath()
+          : authPath("/app/connect-wallet")
+        : authPath("/login")
+    );
   }
 }
 function renderAuth() {
@@ -759,7 +753,6 @@ function renderAuth() {
     register: "Build with more agents.",
     forgot: "Reset your password.",
     reset: "Choose a new password.",
-    verify: "Confirm your email.",
     connect: session?.account.wallet
       ? "Reconnect your wallet."
       : "Link your wallet.",
@@ -789,7 +782,7 @@ function renderAuth() {
     )[view];
     intro =
       view === "register"
-        ? "Create your account, confirm your email, then connect a Solana wallet."
+        ? "Create your account with email and password, then connect a Solana wallet."
         : view === "login"
         ? "Sign in with your email. Your wallet is connected in the next step."
         : view === "forgot"
@@ -818,34 +811,6 @@ function renderAuth() {
             "Sign in",
             "auth-text-link"
           )}`;
-  } else if (view === "verify") {
-    intro = session
-      ? `Confirm <strong>${escape(session.account.email)}</strong> to continue.`
-      : "Open your confirmation link, then sign in to continue.";
-    content = query.get("token")
-      ? `<p>This link confirms the email address used to create your account.</p>${button(
-          "verify-email",
-          "Confirm email",
-          "",
-          "primary"
-        )}`
-      : `<p>Open the confirmation email and follow its link.</p>${
-          localMail
-            ? `<div class="local-mail"><span class="badge">LOCAL EMAIL PREVIEW</span><p>No email is sent. View the confirmation saved on this computer.</p>${button(
-                "preview-email",
-                "View confirmation email"
-              )}</div>`
-            : ""
-        }${
-          session
-            ? button("resend-email", "Create a new confirmation email")
-            : routeLink(authPath("/login"), "Sign in")
-        }`;
-    content +=
-      '<div id="email-preview"></div><p id="auth-error" role="alert"></p>';
-    bottom = session
-      ? button("logout", "Use another account", "", "quiet")
-      : "";
   } else {
     intro = `Signed in as <strong>${escape(
       session!.account.email
@@ -878,10 +843,8 @@ function renderAuth() {
   ).innerHTML = `<div class="auth-shell"><a href="/" class="auth-brand">ctrl-mesh<span>↗</span></a><div class="auth-progress" aria-label="Account setup"><span class="${
     ["login", "register", "forgot", "reset"].includes(view) ? "current" : ""
   }">01 Account</span><span class="${
-    view === "verify" ? "current" : ""
-  }">02 Email</span><span class="${
     view === "connect" ? "current" : ""
-  }">03 Wallet</span></div><section class="panel auth-card"><h1>${
+  }">02 Wallet</span></div><section class="panel auth-card"><h1>${
     heading[view]
   }</h1><p class="auth-intro">${intro}</p>${content}<div class="auth-bottom">${bottom}</div></section><p class="auth-footer">Shared context. Independent agents. Verifiable work.</p></div>`;
   if (authBusy)
@@ -937,38 +900,6 @@ function renderAuth() {
       }
     };
 }
-async function emailAction(name: string) {
-  if (name === "preview-email") {
-    const { message } = await api("session/local-email");
-    if (!message) throw Error("No confirmation email found. Create a new one.");
-    const url = new URL(message.url);
-    url.searchParams.set("next", nextPath());
-    $(
-      "email-preview"
-    ).innerHTML = `<div class="local-mail"><p class="small-label">TO ${escape(
-      message.to
-    )}</p><h3>${escape(
-      message.subject
-    )}</h3><p>Confirm your email to continue setting up ctrl-mesh.</p>${routeLink(
-      url.pathname + url.search,
-      "Open confirmation link →"
-    )}</div>`;
-  } else if (name === "resend-email") {
-    await api("session/resend", {});
-    toast("A new confirmation is saved in local email preview.");
-    if (localMail) await emailAction("preview-email");
-  } else {
-    await api("session/verify", {
-      token: new URLSearchParams(location.search).get("token"),
-    });
-    const next = nextPath();
-    history.replaceState(null, "", authPath("/verify-email", next));
-    await authenticate();
-    navigate(session ? next : authPath("/login", next), true);
-    toast("Email confirmed.");
-  }
-}
-
 function render() {
   guardRoute();
   const auth = authViews.includes(route.view);
@@ -1093,7 +1024,7 @@ function render() {
   if (view === "account") {
     $(
       "content"
-    ).innerHTML = `<div class="split"><section class="panel"><span class="badge">VERIFIED ACCOUNT</span><h2>${escape(
+    ).innerHTML = `<div class="split"><section class="panel"><span class="badge">WALLET LINKED</span><h2>${escape(
       session!.account.email
     )}</h2><p class="small-label">LINKED SOLANA WALLET</p><p class="hash">${escape(
       session!.account.wallet
@@ -1691,8 +1622,6 @@ function renderDetail() {
   }</div></section></div></div>`;
 }
 async function action(name: string, id: string) {
-  if (["preview-email", "resend-email", "verify-email"].includes(name))
-    return emailAction(name);
   if (name === "login-wallet") {
     if (authBusy) return;
     authBusy = true;

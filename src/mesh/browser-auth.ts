@@ -63,8 +63,6 @@ export class BrowserAuth {
   }
   actor(req: IncomingMessage) {
     const s = this.requireSession(req);
-    if (!s.account.verified)
-      throw authError("Confirm your email before opening the workspace.", 403);
     if (!s.actor)
       throw authError(
         "Connect and verify your linked wallet to open the workspace.",
@@ -78,10 +76,7 @@ export class BrowserAuth {
   }
   private mailer() {
     if (!this.mail)
-      throw authError(
-        "Email delivery is not configured. Account registration is unavailable.",
-        503
-      );
+      throw authError("Password reset delivery is not configured.", 503);
     return this.mail;
   }
   private async attempt(key: string, limit = 8, window = 15 * 60000) {
@@ -90,20 +85,14 @@ export class BrowserAuth {
   private send(
     accountId: string,
     email: string,
-    purpose: "verify" | "reset",
     token: string,
     expires: number,
     origin: string
   ) {
-    this.mailer().send(accountId, purpose, {
+    this.mailer().send(accountId, "reset", {
       to: email,
-      subject:
-        purpose === "verify"
-          ? "Confirm your ctrl-mesh email"
-          : "Reset your ctrl-mesh password",
-      url: `${origin}/${
-        purpose === "verify" ? "verify-email" : "reset-password"
-      }?token=${token}`,
+      subject: "Reset your ctrl-mesh password",
+      url: `${origin}/reset-password?token=${token}`,
       expires,
     });
   }
@@ -113,15 +102,12 @@ export class BrowserAuth {
     input: any,
     origin: string
   ) {
-    this.mailer();
     const email = normalizeEmail(input.email);
     await this.attempt("register:" + req.socket.remoteAddress, 10, 60 * 60000);
     const password = await hashPassword(input.password),
       accountId = randomUUID(),
       session = random(),
-      token = random(),
-      expires = Date.now() + SESSION_MS,
-      tokenExpires = Date.now() + 24 * 60 * 60000;
+      expires = Date.now() + SESSION_MS;
     await this.engine.account({
       op: "register",
       accountId,
@@ -129,12 +115,9 @@ export class BrowserAuth {
       password,
       session: hash(session),
       expires,
-      token: hash(token),
-      tokenExpires,
       ...this.previous(req),
     });
     this.setCookie(res, session, origin);
-    this.send(accountId, email, "verify", token, tokenExpires, origin);
     return this.engine.store.accounts.session(hash(session));
   }
   async login(
@@ -163,30 +146,6 @@ export class BrowserAuth {
     this.setCookie(res, session, origin);
     return this.engine.store.accounts.session(hash(session));
   }
-  async resend(req: IncomingMessage, origin: string) {
-    this.mailer();
-    await this.engine.readBarrier();
-    const s = this.requireSession(req);
-    if (s.account.verified) return { ok: true };
-    await this.attempt("verify:" + s.account.id, 3, 10 * 60000);
-    const token = random(),
-      expires = Date.now() + 24 * 60 * 60000;
-    await this.engine.account({
-      op: "token",
-      accountId: s.account.id,
-      purpose: "verify",
-      token: hash(token),
-      expires,
-    });
-    this.send(s.account.id, s.account.email, "verify", token, expires, origin);
-    return { ok: true };
-  }
-  async verify(input: any) {
-    if (typeof input.token !== "string" || !/^[a-f0-9]{64}$/.test(input.token))
-      throw authError("Invalid email link.");
-    await this.engine.account({ op: "verify", token: hash(input.token) });
-    return { ok: true };
-  }
   async forgot(req: IncomingMessage, input: any, origin: string) {
     this.mailer();
     const email = normalizeEmail(input.email);
@@ -203,7 +162,7 @@ export class BrowserAuth {
         token: hash(token),
         expires,
       });
-      this.send(account.id, account.email, "reset", token, expires, origin);
+      this.send(account.id, account.email, token, expires, origin);
     }
     return { ok: true, localMail: !!this.mail };
   }
@@ -218,16 +177,6 @@ export class BrowserAuth {
     });
     return { ok: true };
   }
-  async localEmail(req: IncomingMessage) {
-    await this.engine.readBarrier();
-    const s = this.requireSession(req);
-    return {
-      mode: this.mail ? "local" : "unavailable",
-      message: !s.account.verified
-        ? this.mail?.verification(s.account.id) || null
-        : null,
-    };
-  }
   async challenge(
     req: IncomingMessage,
     _res: ServerResponse,
@@ -236,8 +185,6 @@ export class BrowserAuth {
   ) {
     await this.engine.readBarrier();
     const s = this.requireSession(req);
-    if (!s.account.verified)
-      throw authError("Confirm your email before connecting a wallet.", 403);
     const actor = new PublicKey(input.actor).toBase58();
     if (actor !== input.actor) throw authError("Invalid wallet address");
     if (s.account.wallet && s.account.wallet !== actor)

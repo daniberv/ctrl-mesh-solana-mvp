@@ -94,7 +94,6 @@ describe("automatic writable failover", function () {
     engine.consensus = raft;
     const relay = createRelay(engine, {
       port: 4211 + i,
-      localMailDir: join(directory, "mail"),
     });
     nodes[i] = { store, engine, raft, relay, alive: true };
     await relay.start();
@@ -442,14 +441,7 @@ describe("automatic writable failover", function () {
     });
     assert.equal(registration.status, 200);
     let cookie = registration.headers.getSetCookie()[0].split(";")[0];
-    const preview = await (
-      await request("session/local-email", undefined, cookie)
-    ).json();
-    const token = new URL(preview.message.url).searchParams.get("token");
-    assert.equal(
-      (await request("session/verify", { token }, cookie)).status,
-      200
-    );
+    assert.equal((await registration.json()).account.verified, false);
     const c = await (
       await request(
         "session/challenge",
@@ -484,6 +476,11 @@ describe("automatic writable failover", function () {
       (await (await request("session", undefined, cookie)).json()).session
         .account.email,
       "ha@example.test"
+    );
+    assert.equal(
+      (await (await request("session", undefined, cookie)).json()).session
+        .account.verified,
+      false
     );
     await start(first);
     await sync();

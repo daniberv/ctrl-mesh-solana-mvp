@@ -8,8 +8,9 @@ export type AccountCommand =
       password: string;
       session: string;
       expires: number;
-      token: string;
-      tokenExpires: number;
+      // Retained for replaying registrations created before email confirmation was disabled.
+      token?: string;
+      tokenExpires?: number;
       previous?: string;
     }
   | {
@@ -101,10 +102,7 @@ export class Accounts {
             verified: !!row.verified,
             wallet: row.wallet,
           },
-          actor:
-            row.verified && row.wallet === row.session_wallet
-              ? row.wallet || ""
-              : "",
+          actor: row.wallet === row.session_wallet ? row.wallet || "" : "",
           expires: row.expires,
         }
       : undefined;
@@ -132,10 +130,8 @@ export class Accounts {
     if (c.op === "wallet") {
       const session = this.session(c.previous, now),
         account = this.byId(c.accountId);
-      if (!session || session.account.id !== c.accountId)
+      if (!session || !account || session.account.id !== c.accountId)
         throw authError("Authentication required", 401);
-      if (!account?.verified)
-        throw authError("Confirm your email before connecting a wallet.", 403);
       if (account.wallet && account.wallet !== c.wallet)
         throw authError("Use the wallet already linked to this account.", 409);
       const owner = this.db
@@ -209,7 +205,8 @@ export class Accounts {
           )
           .run(c.accountId, c.email, c.password, action.now);
         session(null);
-        token(c.accountId, c.token, "verify", c.tokenExpires);
+        if (c.token !== undefined && c.tokenExpires !== undefined)
+          token(c.accountId, c.token, "verify", c.tokenExpires);
       } else if (c.op === "login") session(null);
       else if (c.op === "logout") revoke(c.session);
       else if (c.op === "disconnect") {

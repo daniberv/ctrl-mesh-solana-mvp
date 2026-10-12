@@ -1,5 +1,5 @@
 # Routing
-Public landing / uses web/landing.html + landing.css. Account and app pages use web/index.html + frontend.ts + style.css.
+Public landing / uses web/landing.html + landing.css. Account and app pages use web/index.html + frontend.ts + style.css. Email confirmation is disabled: /verify-email only redirects to sign-in (or continues onboarding from browser history), and is not an onboarding step.
 ```ts
 /** Shared by the browser and HTTP server. Every workspace page lives under /app. */
 export const sectionPaths = {

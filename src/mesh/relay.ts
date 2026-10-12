@@ -5,7 +5,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { Engine } from "./engine";
 import { address, Entry, verifyEvent } from "./events";
 import { Federation } from "./federation";
-import { legacyRoute, parseRoute } from "../routes";
+import { legacyRoute, parseRoute, safeReturnPath } from "../routes";
 import { BrowserAuth } from "./browser-auth";
 import { LocalMail } from "./local-mail";
 export type DemoControl = {
@@ -121,7 +121,7 @@ export function createRelay(
         });
       }
       if (path === "/api/session/local-email" && req.method === "GET")
-        return json(res, 200, await browserAuth.localEmail(req));
+        return json(res, 410, { error: "Email confirmation is disabled." });
       if (path.startsWith("/api/session/") && req.method === "POST") {
         const origin = browserOrigin(req);
         limit("login:" + req.socket.remoteAddress);
@@ -132,10 +132,8 @@ export function createRelay(
             200,
             await browserAuth.register(req, res, input, origin)
           );
-        if (path === "/api/session/verify")
-          return json(res, 200, await browserAuth.verify(input));
-        if (path === "/api/session/resend")
-          return json(res, 200, await browserAuth.resend(req, origin));
+        if (path === "/api/session/verify" || path === "/api/session/resend")
+          return json(res, 410, { error: "Email confirmation is disabled." });
         if (path === "/api/session/forgot")
           return json(res, 200, await browserAuth.forgot(req, input, origin));
         if (path === "/api/session/reset")
@@ -331,6 +329,20 @@ export function createRelay(
           );
         }
         return json(res, 404, { error: "Not found" });
+      }
+      if (
+        path === "/verify-email" &&
+        (req.method === "GET" || req.method === "HEAD")
+      ) {
+        const next = safeReturnPath(
+          new URL(req.url!, "http://localhost").searchParams.get("next")
+        );
+        res.writeHead(302, {
+          Location: "/login?next=" + encodeURIComponent(next),
+          "Cache-Control": "no-store",
+        });
+        res.end();
+        return;
       }
       const legacy = legacyRoute(path);
       if (legacy && (req.method === "GET" || req.method === "HEAD")) {

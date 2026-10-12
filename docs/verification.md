@@ -1,10 +1,20 @@
 # Verification record
 
-Latest local verification: **36 test cases passed** on October 12, 2026, in one full run (55 seconds), against the existing local validator. TypeScript checks and the browser bundle build also passed.
+## Email confirmation disabled — October 12, 2026
 
-The email-account release adds normalized unique email accounts, salted password hashing, local confirmation links, email-before-wallet gates, one-account/one-wallet enforcement (including concurrent claims), session-bound signatures, password reset with complete session/socket revocation, persistent rate limits, and account/session failover. Routes are now separated into public `/`, account entry and protected `/app/...` pages. The previous wallet-only flow and browser demo-role selector have been replaced.
+**17 focused tests passed** (19 seconds): all 11 browser-account cases and all six automatic failover cases, using the existing local Solana validator. TypeScript checks and the browser bundle build passed. This correction did not rerun the complete platform suite.
 
-Current browser checks: registration → local confirmation preview → confirmation → wallet proof → return to the original `/app/market` destination; rejected then accepted wallet signature; account details, all six navigation sections, mobile layout at 390px, full page reload restoring the session without a wallet provider, logout/Back returning to login, a rejected password followed by a valid sign-in requiring the original wallet again, and zero console errors during the successful flow (the intentional bad password returns HTTP 401). The provider is an ephemeral WebCrypto Ed25519 test adapter; actual Phantom/Solflare extensions were not available. The existing live work history remains **41 events** on all three nodes, with matching hashes and zero pending transactions.
+Registration works with no mail provider or local mail mode. Accounts remain `verified: false` and proceed from email/password straight to signed wallet binding. The checks retain unique email/wallet claims, forged/replayed/expired signature rejection, session/origin binding, logout/reset revocation, durable rate limits, registration/session replication, coordinator failure, and result/payment recovery without duplicate payouts. Retired confirmation APIs return 410 and old confirmation links preserve only a validated return path.
+
+Browser check: direct `/app/market` → sign-in → registration → wallet connection → `/app/market`, with **zero confirmation requests**, `verified: false`, and private context HTTP 200 after the wallet proof. Account details display **WALLET LINKED**. Opening an old confirmation link drops its token and returns to the intended workspace; the session and live stream survive the reload with no wallet provider present. Logout returns to sign-in. The two-step account/wallet form was checked at 390px, with no console errors. The signature used an ephemeral WebCrypto Ed25519 adapter, not an installed wallet extension.
+
+All three live nodes were upgraded. Existing work history remains **41 events** with matching hashes and zero pending transactions. Historical account and confirmation actions replay successfully alongside new token-free registrations.
+
+## Previous email-account release — October 12, 2026
+
+The complete suite passed **36 cases** in 55 seconds before this correction. That release added normalized unique email accounts, salted password hashing, one-account/one-wallet enforcement, session-bound signatures, password reset with full session/socket revocation, persistent rate limits, and account/session failover. Routes were separated into public `/`, account entry and protected `/app/...` pages. Its local email confirmation step has now been removed.
+
+Earlier browser checks covered all six navigation sections, 390px mobile layout, rejected/accepted signatures, refresh restoration, logout/Back, and bad-password rejection followed by sign-in requiring the original wallet. Actual Phantom/Solflare extensions were unavailable.
 
 ## Earlier platform verification
 
