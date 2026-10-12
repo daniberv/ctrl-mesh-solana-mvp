@@ -10,3 +10,10 @@ test-ledger
 .env
 .env.*
 .yarn
+
+.mesh/
+.mesh-test/
+
+.mesh-backups/
+
+/web/app.js

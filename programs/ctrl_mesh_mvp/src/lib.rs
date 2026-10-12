@@ -1,5 +1,7 @@
 use anchor_lang::prelude::*;
+mod platform;
 use anchor_lang::system_program::{self, Transfer};
+use platform::*;
 
 declare_id!("F6eKaEwArFVNWphDWbzawQmnboAVr8XWwDHY8FkzJ2Qi");
 
@@ -11,13 +13,145 @@ const REFUNDED: u8 = 3;
 #[program]
 pub mod ctrl_mesh_mvp {
     use super::*;
+    pub fn project_withdraw(
+        ctx: Context<ProjectWithdraw>,
+        amount: u64,
+        revision: u64,
+        event: [u8; 32],
+    ) -> Result<()> {
+        require!(event != [0; 32], MeshError::Invalid);
+        platform::project_withdraw(ctx, amount, revision, event)
+    }
+    pub fn job_reclaim(ctx: Context<JobCancel>, revision: u64, event: [u8; 32]) -> Result<()> {
+        require!(event != [0; 32], MeshError::Invalid);
+        platform::job_reclaim(ctx, revision, event)
+    }
+    pub fn project_checkpoint(
+        ctx: Context<ProjectCheckpoint>,
+        revision: u64,
+        event: [u8; 32],
+    ) -> Result<()> {
+        require!(event != [0; 32], MeshError::Invalid);
+        platform::project_checkpoint(ctx, revision, event)
+    }
+    pub fn project_create(
+        ctx: Context<ProjectCreate>,
+        id: u64,
+        manager: Pubkey,
+        reviewer: Pubkey,
+        allowance: u64,
+        expires: i64,
+        amount: u64,
+        event: [u8; 32],
+    ) -> Result<()> {
+        require!(event != [0; 32], MeshError::Invalid);
+        platform::project_create(
+            ctx, id, manager, reviewer, allowance, expires, amount, event,
+        )
+    }
+    pub fn project_policy(
+        ctx: Context<ProjectPolicy>,
+        manager: Pubkey,
+        reviewer: Pubkey,
+        allowance: u64,
+        expires: i64,
+        revision: u64,
+        event: [u8; 32],
+    ) -> Result<()> {
+        require!(event != [0; 32], MeshError::Invalid);
+        platform::project_policy(ctx, manager, reviewer, allowance, expires, revision, event)
+    }
+    pub fn job_open(
+        ctx: Context<JobOpen>,
+        id: u64,
+        budget: u64,
+        deadline: i64,
+        dependencies: Vec<Pubkey>,
+        event: [u8; 32],
+    ) -> Result<()> {
+        require!(event != [0; 32], MeshError::Invalid);
+        platform::job_open(ctx, id, budget, deadline, dependencies, event)
+    }
+    pub fn job_award(
+        ctx: Context<JobManage>,
+        worker: Pubkey,
+        recipient: Pubkey,
+        amount: u64,
+        lease_until: i64,
+        revision: u64,
+        event: [u8; 32],
+    ) -> Result<()> {
+        require!(event != [0; 32], MeshError::Invalid);
+        platform::job_award(ctx, worker, recipient, amount, lease_until, revision, event)
+    }
+    pub fn job_submit(
+        ctx: Context<JobManage>,
+        hash: [u8; 32],
+        revision: u64,
+        event: [u8; 32],
+    ) -> Result<()> {
+        require!(event != [0; 32], MeshError::Invalid);
+        platform::job_submit(ctx, hash, revision, event)
+    }
+    pub fn job_review(
+        ctx: Context<JobManage>,
+        root: [u8; 32],
+        approved: bool,
+        revision: u64,
+        event: [u8; 32],
+    ) -> Result<()> {
+        require!(event != [0; 32], MeshError::Invalid);
+        platform::job_review(ctx, root, approved, revision, event)
+    }
+    pub fn job_accept(
+        ctx: Context<JobManage>,
+        root: [u8; 32],
+        revision: u64,
+        event: [u8; 32],
+    ) -> Result<()> {
+        require!(event != [0; 32], MeshError::Invalid);
+        platform::job_accept(ctx, root, revision, event)
+    }
+    pub fn job_claim(ctx: Context<JobClaim>, revision: u64, event: [u8; 32]) -> Result<()> {
+        require!(event != [0; 32], MeshError::Invalid);
+        platform::job_claim(ctx, revision, event)
+    }
+    pub fn job_cancel(ctx: Context<JobCancel>, revision: u64, event: [u8; 32]) -> Result<()> {
+        require!(event != [0; 32], MeshError::Invalid);
+        platform::job_cancel(ctx, revision, event)
+    }
+    pub fn job_release(
+        ctx: Context<JobManage>,
+        worker: Pubkey,
+        revision: u64,
+        event: [u8; 32],
+    ) -> Result<()> {
+        require!(event != [0; 32], MeshError::Invalid);
+        platform::job_release(ctx, worker, revision, event)
+    }
+    pub fn job_renew(
+        ctx: Context<JobManage>,
+        lease_until: i64,
+        revision: u64,
+        event: [u8; 32],
+    ) -> Result<()> {
+        require!(event != [0; 32], MeshError::Invalid);
+        platform::job_renew(ctx, lease_until, revision, event)
+    }
 
     pub fn create_task(
-        ctx: Context<CreateTask>, task_id: u64, worker: Pubkey, approver: Pubkey,
-        amount: u64, deadline: i64,
+        ctx: Context<CreateTask>,
+        task_id: u64,
+        worker: Pubkey,
+        approver: Pubkey,
+        amount: u64,
+        deadline: i64,
     ) -> Result<()> {
         require!(amount > 0, EscrowError::InvalidAmount);
-        require!(deadline > Clock::get()?.unix_timestamp, EscrowError::InvalidDeadline);
+        require!(
+            deadline > Clock::get()?.unix_timestamp,
+            EscrowError::InvalidDeadline
+        );
         require!(worker != Pubkey::default(), EscrowError::InvalidWorker);
         require!(approver != Pubkey::default(), EscrowError::InvalidApprover);
         require!(worker != approver, EscrowError::SameWorkerAndApprover);
@@ -31,55 +165,102 @@ pub mod ctrl_mesh_mvp {
         task.state = OPEN;
         task.package_hash = [0; 32];
         task.bump = ctx.bumps.task;
-        system_program::transfer(CpiContext::new(
-            ctx.accounts.system_program.to_account_info(),
-            Transfer { from: ctx.accounts.owner.to_account_info(), to: task.to_account_info() },
-        ), amount)?;
-        emit!(TaskOpened { task: task.key(), owner: task.owner, worker, approver, amount, deadline });
+        system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.owner.to_account_info(),
+                    to: task.to_account_info(),
+                },
+            ),
+            amount,
+        )?;
+        emit!(TaskOpened {
+            task: task.key(),
+            owner: task.owner,
+            worker,
+            approver,
+            amount,
+            deadline
+        });
         Ok(())
     }
 
     pub fn submit_work(ctx: Context<SubmitWork>, package_hash: [u8; 32]) -> Result<()> {
         let task = &mut ctx.accounts.task;
         require!(task.state == OPEN, EscrowError::WrongState);
-        require!(Clock::get()?.unix_timestamp <= task.deadline, EscrowError::DeadlinePassed);
+        require!(
+            Clock::get()?.unix_timestamp <= task.deadline,
+            EscrowError::DeadlinePassed
+        );
         require!(package_hash != [0; 32], EscrowError::InvalidPackageHash);
         task.package_hash = package_hash;
         task.state = SUBMITTED;
-        emit!(WorkSubmitted { task: task.key(), worker: task.worker, package_hash });
+        emit!(WorkSubmitted {
+            task: task.key(),
+            worker: task.worker,
+            package_hash
+        });
         Ok(())
     }
 
     pub fn accept_work(ctx: Context<AcceptWork>, package_hash: [u8; 32]) -> Result<()> {
         let task = &mut ctx.accounts.task;
         require!(task.state == SUBMITTED, EscrowError::WrongState);
-        require!(Clock::get()?.unix_timestamp <= task.deadline, EscrowError::DeadlinePassed);
-        require!(package_hash == task.package_hash, EscrowError::PackageHashMismatch);
+        require!(
+            Clock::get()?.unix_timestamp <= task.deadline,
+            EscrowError::DeadlinePassed
+        );
+        require!(
+            package_hash == task.package_hash,
+            EscrowError::PackageHashMismatch
+        );
         let task_info = task.to_account_info();
         let worker_info = ctx.accounts.worker.to_account_info();
         let rent = Rent::get()?.minimum_balance(8 + Task::INIT_SPACE);
-        let remaining = task_info.lamports().checked_sub(task.amount).ok_or(EscrowError::InsufficientEscrow)?;
+        let remaining = task_info
+            .lamports()
+            .checked_sub(task.amount)
+            .ok_or(EscrowError::InsufficientEscrow)?;
         require!(remaining >= rent, EscrowError::InsufficientEscrow);
         **task_info.try_borrow_mut_lamports()? -= task.amount;
         **worker_info.try_borrow_mut_lamports()? += task.amount;
         task.state = ACCEPTED;
-        emit!(WorkAccepted { task: task.key(), worker: task.worker, package_hash, amount: task.amount });
+        emit!(WorkAccepted {
+            task: task.key(),
+            worker: task.worker,
+            package_hash,
+            amount: task.amount
+        });
         Ok(())
     }
 
     pub fn refund_expired(ctx: Context<RefundExpired>) -> Result<()> {
         let task = &mut ctx.accounts.task;
-        require!(task.state == OPEN || task.state == SUBMITTED, EscrowError::WrongState);
-        require!(Clock::get()?.unix_timestamp > task.deadline, EscrowError::DeadlineNotPassed);
+        require!(
+            task.state == OPEN || task.state == SUBMITTED,
+            EscrowError::WrongState
+        );
+        require!(
+            Clock::get()?.unix_timestamp > task.deadline,
+            EscrowError::DeadlineNotPassed
+        );
         let task_info = task.to_account_info();
         let owner_info = ctx.accounts.owner.to_account_info();
         let rent = Rent::get()?.minimum_balance(8 + Task::INIT_SPACE);
-        let remaining = task_info.lamports().checked_sub(task.amount).ok_or(EscrowError::InsufficientEscrow)?;
+        let remaining = task_info
+            .lamports()
+            .checked_sub(task.amount)
+            .ok_or(EscrowError::InsufficientEscrow)?;
         require!(remaining >= rent, EscrowError::InsufficientEscrow);
         **task_info.try_borrow_mut_lamports()? -= task.amount;
         **owner_info.try_borrow_mut_lamports()? += task.amount;
         task.state = REFUNDED;
-        emit!(TaskRefunded { task: task.key(), owner: task.owner, amount: task.amount });
+        emit!(TaskRefunded {
+            task: task.key(),
+            owner: task.owner,
+            amount: task.amount
+        });
         Ok(())
     }
 }
@@ -135,25 +316,56 @@ pub struct Task {
 }
 
 #[event]
-pub struct TaskOpened { pub task: Pubkey, pub owner: Pubkey, pub worker: Pubkey, pub approver: Pubkey, pub amount: u64, pub deadline: i64 }
+pub struct TaskOpened {
+    pub task: Pubkey,
+    pub owner: Pubkey,
+    pub worker: Pubkey,
+    pub approver: Pubkey,
+    pub amount: u64,
+    pub deadline: i64,
+}
 #[event]
-pub struct WorkSubmitted { pub task: Pubkey, pub worker: Pubkey, pub package_hash: [u8; 32] }
+pub struct WorkSubmitted {
+    pub task: Pubkey,
+    pub worker: Pubkey,
+    pub package_hash: [u8; 32],
+}
 #[event]
-pub struct WorkAccepted { pub task: Pubkey, pub worker: Pubkey, pub package_hash: [u8; 32], pub amount: u64 }
+pub struct WorkAccepted {
+    pub task: Pubkey,
+    pub worker: Pubkey,
+    pub package_hash: [u8; 32],
+    pub amount: u64,
+}
 #[event]
-pub struct TaskRefunded { pub task: Pubkey, pub owner: Pubkey, pub amount: u64 }
+pub struct TaskRefunded {
+    pub task: Pubkey,
+    pub owner: Pubkey,
+    pub amount: u64,
+}
 
 #[error_code]
 pub enum EscrowError {
-    #[msg("Amount must be positive")] InvalidAmount,
-    #[msg("Deadline must be in the future")] InvalidDeadline,
-    #[msg("Worker key is invalid")] InvalidWorker,
-    #[msg("Approver key is invalid")] InvalidApprover,
-    #[msg("Worker and approver must be different keys")] SameWorkerAndApprover,
-    #[msg("Task is in the wrong state")] WrongState,
-    #[msg("Deadline has passed")] DeadlinePassed,
-    #[msg("Deadline has not passed")] DeadlineNotPassed,
-    #[msg("Package hash must be nonzero")] InvalidPackageHash,
-    #[msg("Package hash does not match the submitted work")] PackageHashMismatch,
-    #[msg("Escrow balance is insufficient")] InsufficientEscrow,
+    #[msg("Amount must be positive")]
+    InvalidAmount,
+    #[msg("Deadline must be in the future")]
+    InvalidDeadline,
+    #[msg("Worker key is invalid")]
+    InvalidWorker,
+    #[msg("Approver key is invalid")]
+    InvalidApprover,
+    #[msg("Worker and approver must be different keys")]
+    SameWorkerAndApprover,
+    #[msg("Task is in the wrong state")]
+    WrongState,
+    #[msg("Deadline has passed")]
+    DeadlinePassed,
+    #[msg("Deadline has not passed")]
+    DeadlineNotPassed,
+    #[msg("Package hash must be nonzero")]
+    InvalidPackageHash,
+    #[msg("Package hash does not match the submitted work")]
+    PackageHashMismatch,
+    #[msg("Escrow balance is insufficient")]
+    InsufficientEscrow,
 }

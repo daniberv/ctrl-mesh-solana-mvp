@@ -29,7 +29,7 @@ describe("ctrl-mesh escrow", () => {
     await program.methods.createTask(
       new anchor.BN(id), worker.publicKey, approver.publicKey,
       new anchor.BN(amount), new anchor.BN(deadline),
-    ).accounts({ owner, task, systemProgram: SystemProgram.programId }).rpc();
+    ).accountsStrict({ owner, task, systemProgram: SystemProgram.programId }).rpc();
     return { task, amount };
   }
 
@@ -49,23 +49,23 @@ describe("ctrl-mesh escrow", () => {
     const wrongHash = [...createHash("sha256").update("changed work package").digest()];
     const before = await provider.connection.getBalance(worker.publicKey);
 
-    await program.methods.submitWork(hash).accounts({ task, worker: worker.publicKey }).signers([worker]).rpc();
+    await program.methods.submitWork(hash).accountsStrict({ task, worker: worker.publicKey }).signers([worker]).rpc();
     await assert.rejects(
-      program.methods.acceptWork(wrongHash).accounts({ task, approver: approver.publicKey, worker: worker.publicKey }).signers([approver]).rpc(),
+      program.methods.acceptWork(wrongHash).accountsStrict({ task, approver: approver.publicKey, worker: worker.publicKey }).signers([approver]).rpc(),
       /PackageHashMismatch|Package hash does not match/,
     );
     await assert.rejects(
-      program.methods.acceptWork(hash).accounts({ task, approver: outsider.publicKey, worker: worker.publicKey }).signers([outsider]).rpc(),
+      program.methods.acceptWork(hash).accountsStrict({ task, approver: outsider.publicKey, worker: worker.publicKey }).signers([outsider]).rpc(),
       /ConstraintHasOne|has_one/,
     );
-    await program.methods.acceptWork(hash).accounts({ task, approver: approver.publicKey, worker: worker.publicKey }).signers([approver]).rpc();
+    await program.methods.acceptWork(hash).accountsStrict({ task, approver: approver.publicKey, worker: worker.publicKey }).signers([approver]).rpc();
     const after = await provider.connection.getBalance(worker.publicKey);
     assert.equal(after - before, amount);
     const state = await program.account.task.fetch(task);
     assert.equal(state.state, 2);
     assert.deepEqual(state.packageHash, hash);
     await assert.rejects(
-      program.methods.acceptWork(hash).accounts({ task, approver: approver.publicKey, worker: worker.publicKey }).signers([approver]).rpc(),
+      program.methods.acceptWork(hash).accountsStrict({ task, approver: approver.publicKey, worker: worker.publicKey }).signers([approver]).rpc(),
       /WrongState|wrong state/,
     );
   });
@@ -76,18 +76,18 @@ describe("ctrl-mesh escrow", () => {
     await fund(worker.publicKey);
     const { task, amount } = await create(Date.now() + 1, worker, approver, Math.floor(Date.now() / 1000) + 3);
     await assert.rejects(
-      program.methods.refundExpired().accounts({ task, owner }).rpc(),
+      program.methods.refundExpired().accountsStrict({ task, owner }).rpc(),
       /DeadlineNotPassed|Deadline has not passed/,
     );
     await new Promise((resolve) => setTimeout(resolve, 5000));
     const before = await provider.connection.getBalance(task);
-    await program.methods.refundExpired().accounts({ task, owner }).rpc();
+    await program.methods.refundExpired().accountsStrict({ task, owner }).rpc();
     const after = await provider.connection.getBalance(task);
     assert.equal(before - after, amount);
     const state = await program.account.task.fetch(task);
     assert.equal(state.state, 3);
     await assert.rejects(
-      program.methods.refundExpired().accounts({ task, owner }).rpc(),
+      program.methods.refundExpired().accountsStrict({ task, owner }).rpc(),
       /WrongState|wrong state/,
     );
   });

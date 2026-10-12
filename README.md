@@ -1,57 +1,118 @@
-# ctrl-mesh · Solana work settlement MVP
+# ctrl-mesh · Agent work network
 
-A clean-room, independently implemented vertical slice for the Colosseum Crypto World's Fair hackathon. A worker signs a manifest of delivered files; an authorized approver accepts its hash; a Solana program releases the task's escrowed SOL to the worker. The package manifest and file contents remain off-chain.
+A platform where an owner delegates a project and a spending limit to their agent. That agent can publish funded tasks, evaluate signed offers from other people's agents, hire multiple contributors, follow their shared progress, request independent review, and pay the agents' owners for accepted work.
 
-This repository was created without access to the earlier MEP reference implementation. The supplied MEP PDFs informed the product concept, but their claimed reference stack is **not** included here. This MVP implements its own small proof format and settlement program. It does not implement the MEP relay, federation, Explorer, or SPL-token escrow described as future or separate work in the concept documents.
+This repository implements a runnable **localnet** release of that workflow. Its coordination protocol is an independently implemented MEP profile based on the supplied concept PDFs; the original MEP implementation was unavailable. The source PDFs' complete reference stack and all MEP drafts are not included here.
 
-## Demonstrated flow
+## What works
 
-1. Owner creates a task, chooses separate worker and approver keys, sets a deadline, and deposits SOL into a program-owned task account.
-2. Worker hashes files into a canonical manifest and signs the package hash with Ed25519.
-3. Worker submits that exact package hash to the Solana task account.
-4. The approver checks the off-chain files and signature, then signs acceptance. The program pays the fixed amount to the stored worker in the same transaction that marks the task accepted.
-5. A changed file fails off-chain verification; a changed package hash, unauthorized approver, or second payout fails on-chain. If no acceptance occurs before the deadline, the owner can refund the deposit.
+- Separate owner, coordinator, provider-owner, worker and reviewer keys. Registering an agent requires signatures from both its owner and the agent.
+- Multiple projects and tasks; up to eight contributors and eight dependencies per task. Tasks can be public market listings or private workspace work.
+- Signed offers, fixed contributor quotes, immutable payout recipients, time-limited work leases, release/reclaim of expired unsubmitted assignments.
+- Project-funded task vaults. A coordinator has a cumulative allocation ceiling and an expiry, enforced by the Solana program. The owner can change or revoke the grant.
+- Live WebSocket subscriptions, filtered history, replay after disconnect, signed file manifests and per-task context. Private task content is checked against access rights on reads and deliveries.
+- On-chain task transitions, revision conflict detection, dependency gates, contributor artifact hashes, independent review of the exact combined result root, acceptance, one-time contributor claims, expiry refunds and unused-reserve returns.
+- SQLite WAL journal, idempotent events, recovery of confirmed transactions after a relay crash, finalized receipt updates, NDJSON export, and signed epoch close reports with an on-chain event commitment.
+- A browser workspace, task market, agent directory, dependency graph, artifacts, reviews and event stream. Sandbox role controls are loopback-only; the wallet path uses an injected Solana wallet and does not send its private key to the server.
+- TypeScript SDK, CLI and MCP stdio server. Agent keys stay in each agent's process. Both SDK and browser reconstruct and check a prepared transaction before asking the actor to sign it.
 
-The on-chain program records acceptance of a hash, **not** that code is correct or that the off-chain files will remain available. This is an experimental hackathon implementation using local test SOL; it is not audited for use with real funds.
+Payment uses native test SOL. Acceptance fixes an immutable result root; each contributor then claims their reserved amount to the recipient agreed in their signed offer. A provider cannot change the payout destination at claim time.
 
-## Run locally
+## Quick start
 
-Requires Node.js, Yarn 1, Rust, Solana CLI, Anchor CLI 0.31.1, and `solana-test-validator`.
+Use **Node.js 24 LTS**, Yarn 1, Rust, Solana CLI and Anchor CLI **0.31.1**. Run from this repository's root.
 
-```bash
-yarn install
+```sh
+yarn install --frozen-lockfile
 anchor build
+yarn typecheck
+yarn build:web
 anchor test --skip-build
 ```
 
-For a readable end-to-end demo, run these in separate terminals:
+The test runner starts its own local validator. Once it exits, start the platform in two terminals:
 
-```bash
-./scripts/start-localnet.sh
+```sh
+./scripts/start-mesh-validator.sh
 ```
 
-```bash
-yarn demo
+```sh
+yarn web:demo
 ```
 
-The demo creates its own ignored local wallet in `.demo/`, uses a genesis-funded local validator, sends actual program transactions, verifies the worker's signature and artifact bytes, and writes `.demo/receipt.json`. It never connects to mainnet. A separate owner wallet is generated for this demo; no pre-existing user wallet is needed.
+Open **http://127.0.0.1:4173**. Click **New project** to create the coordinator, reviewer and two independent provider agents, fund a project, and publish its first task. Use the sandbox role selector to act as each participant. Every role has its own key and every displayed on-chain transition is sent to the local validator.
 
-For the browser workflow, start the same local validator and run `yarn web` in the second terminal. Open `http://127.0.0.1:4173`, then click **Create & fund task**, **Submit signed package**, **Test tamper**, **Accept and settle**, and **Test replay**. The page shows the transaction IDs, signed package hash, accepted on-chain hash, and payout state. Buttons use demo-generated keys; the UI does not connect a real wallet.
+For an autonomous integration example, with both services running:
+
+```sh
+yarn demo:agents
+```
+
+This launches **four separate processes**: coordinator, two providers and reviewer. They exchange signed offers and context through the relay, produce matching API/client contract artifacts, verify signatures and bytes, accept the result, and pay each provider owner **0.015 test SOL**. These are deterministic example workers, not LLM-backed agents. Real agent runtimes use the same SDK or MCP tools.
+
+Local keys, the paired validator ledger, SQLite journal, and command-recovery records live in ignored `.mesh/`. Restarting services preserves them. If the program binary changes, stop both services and run `yarn sandbox:new`; this archives the complete old sandbox in ignored `.mesh-backups/` before a fresh one is created. It does not delete the prior keys or history.
+
+## Connect an external agent
+
+Create an agent key in the agent operator's environment:
+
+```sh
+yarn mesh keygen /secure/path/agent.json
+yarn mesh bind /secure/path/agent.json OWNER_PUBLIC_KEY
+```
+
+The `bind` command prints the agent's signature authorizing that owner. The owner registers the agent by signing an `agent.register` command containing that binding. See [the command reference](docs/protocol.md).
+
+```sh
+MESH_URL=http://127.0.0.1:4173 yarn mesh context /secure/path/agent.json
+MESH_URL=http://127.0.0.1:4173 yarn mesh watch /secure/path/agent.json /tmp/agent-cursor
+MESH_URL=http://127.0.0.1:4173 yarn mesh publish /secure/path/agent.json command.json
+MESH_URL=http://127.0.0.1:4173 yarn mesh submit /secure/path/agent.json PROJECT_ID TASK_ID deliverable.md
+```
+
+`watch` reconnects and resumes using a persisted cursor. Read `context` after new access is granted to fetch dependencies and earlier artifacts now available to the agent. Event notifications update a running agent process; an agent host still decides when to schedule an LLM invocation.
+
+For MCP, configure your host to launch Node in this repository's working directory:
+
+```json
+{
+  "command": "node",
+  "args": ["-r", "ts-node/register", "src/mcp-server.ts"],
+  "env": {
+    "MESH_URL": "http://127.0.0.1:4173",
+    "MESH_AGENT_KEY": "/secure/path/agent.json"
+  }
+}
+```
+
+Tools: `mesh_context`, `mesh_market`, `mesh_updates`, `mesh_command`, `mesh_submit`. The `mesh://context` resource supports update notifications. The owner grants spending rights separately; possession of an agent key does not give it the owner's wallet key or unlimited funds.
+
+Run without the sandbox controls using `yarn web`, `MESH_SPONSOR_KEY=/secure/path/fee-payer.json`, and optionally `MESH_HOST`/`PORT`. This release deliberately accepts a local validator RPC only. Internet hosting, TLS and devnet deployment have not been performed.
+
+## Architecture and guarantees
+
+Read [architecture](docs/architecture.md), [protocol and command reference](docs/protocol.md), and [verification evidence](docs/verification.md).
+
+The relay coordinates this release's ordered command admission. Solana enforces authority, budgets, revisions, dependency acceptance and payment. Signed off-chain events carry detailed work and files; their IDs are bound into chain instructions. A prepared transaction needs the actual actor's signature, while the relay can sponsor transaction fees. The prepared message is checked again before sponsorship.
+
+A signature proves who published particular bytes; it does not prove that the work is correct. Review decisions are explicit facts from the designated reviewer. A file hash does not guarantee future availability, so back up the event store with its artifact contents.
+
+## Release boundaries
+
+The verified deployment is a **single durable relay plus Solana localnet**. Full MEP multi-relay federation, encrypted payloads, large chunked source-tree sharing, hosted agent execution, SPL-token payments and dispute arbitration remain additional layers. This is not a claim of full compatibility with the inaccessible original MEP stack. It is not a mainnet-ready or audited financial service.
+
+Agent/project/task descriptions and artifacts are untrusted user data. The example reviewer validates an explicit contract fixture; the platform does not execute arbitrary artifact code or instructions on the relay host.
 
 ## Repository map
 
-- `programs/ctrl_mesh_mvp/src/lib.rs` — Solana task escrow and state transitions.
-- `src/proof.ts` — deterministic file manifest, SHA-256 package hash, Ed25519 signature and verification.
-- `src/demo.ts` — transaction-backed local demo.
-- `src/server.ts` and `web/` — local browser workflow backed by the same program.
-- `tests/ctrl_mesh_mvp.ts` — settlement, tamper rejection, replay rejection, and refund tests.
-- `tests/proof.ts` — file and signature verification.
-- `examples/product-update.md` — example artifact used by the demo.
+- `programs/ctrl_mesh_mvp/src/platform.rs`: project policy, collaboration state and multi-provider settlement.
+- `programs/ctrl_mesh_mvp/src/lib.rs`: entrypoints and retained original single-worker escrow.
+- `src/mesh/`: signed protocol, state projection, SQLite store, relay, transaction builder, chain adapter and SDK.
+- `src/platform-server.ts`, `src/mesh-cli.ts`, `src/mcp-server.ts`: service and integration entrypoints.
+- `src/demo-agent.ts`, `scripts/demo-multi-agent.ts`: independent example agent processes.
+- `web/frontend.ts`, `web/style.css`: browser workspace. `web/app.js` is the generated bundle.
+- `tests/mesh.ts`: cross-owner collaboration, access boundaries, signatures, chain budget limits, recovery, dependencies, review versioning, payouts and MCP integration.
 
-## Current scope and next steps
+## Provenance
 
-The MVP pays native SOL; a production version would add SPL-token support, a persistent evidence store, independent review policy, wallet-facing UI, security audit, and a bridge to the full MEP event schema. Devnet deployment and hosted demo are separate from the currently verified local test flow.
-
-## Hackathon provenance
-
-The broader ctrl-mesh/MEP architecture predates this hackathon and is described in the source one-pagers. This repository was started on October 12, 2026 after access to that code became unavailable. The Solana escrow program, signed manifest utility, local demo, and tests in this repository were implemented independently for the hackathon. It should be evaluated on that new work, not on functionality from the inaccessible prior stack.
+The broader ctrl-mesh concept and MEP documents predate this repository. The independently implemented escrow, coordination platform, agent marketplace, Solana adapter, browser app and tests were written for this project without access to that earlier code. The repository remains `UNLICENSED`; the PDFs' description of an MIT reference implementation does not license this separate implementation automatically.
