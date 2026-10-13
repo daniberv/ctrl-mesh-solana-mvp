@@ -1,6 +1,7 @@
 import { createHash } from "crypto";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import nacl from "tweetnacl";
+import { verifyDigestSignature } from "./mesh/signatures";
 
 export type Artifact = { path: string; sha256: string; bytes: number };
 export type WorkPackage = {
@@ -111,9 +112,10 @@ export function verifyWorkPackage(
       canonicalPayload(work.taskId, work.worker, work.artifacts)
     );
     if (expectedHash !== work.packageHash) return false;
-    return nacl.sign.detached.verify(
-      Buffer.from(work.packageHash, "hex"),
-      Buffer.from(work.signature, "hex"),
+    return verifyDigestSignature(
+      "work-package",
+      work.packageHash,
+      work.signature,
       new PublicKey(work.worker).toBytes()
     );
   } catch {

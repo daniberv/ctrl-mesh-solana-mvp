@@ -2,7 +2,7 @@ import { readFileSync } from "fs";
 import { ClusterConfig } from "../src/mesh/consensus";
 async function main() {
   const config = JSON.parse(
-    readFileSync(".mesh/ha/cluster.json", "utf8")
+    readFileSync(process.env.MESH_HA_CONFIG || ".mesh/ha/cluster.json", "utf8")
   ) as ClusterConfig;
   const nodes = await Promise.all(
     config.members.map(async (m) => {
@@ -15,6 +15,8 @@ async function main() {
           ...m,
           available: true,
           events: h.events,
+          network: h.network,
+          solana: h.solana,
           hash: h.federation?.hash,
           pending: h.pending,
           ...h.ha,

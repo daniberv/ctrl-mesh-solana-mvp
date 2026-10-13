@@ -8,6 +8,9 @@ import { Federation } from "./federation";
 import { legacyRoute, parseRoute, safeReturnPath } from "../routes";
 import { BrowserAuth } from "./browser-auth";
 import { LocalMail } from "./local-mail";
+import type { Member } from "./consensus";
+import { publicRelayInfo, validatePublicRelays } from "./public-relays";
+import { requestIP } from "./request-ip";
 export type DemoControl = {
   actors: () => any;
   run: (action: string, input: any) => Promise<any>;
@@ -20,9 +23,19 @@ export function createRelay(
     demo?: DemoControl;
     federation?: Federation;
     publicOrigin?: string;
+    publicMembers?: Member[];
+    trustProxy?: boolean;
     localMailDir?: string;
   }
 ) {
+  if (options.publicMembers) {
+    if (!engine.consensus) throw Error("Public relays require an HA cluster");
+    validatePublicRelays(
+      engine.consensus.options.config,
+      options.publicMembers
+    );
+  }
+  const haInfo = () => publicRelayInfo(engine.consensus, options.publicMembers);
   const rates = new Map<string, { count: number; until: number }>();
   const limit = (actor: string) => {
     const now = Date.now();
@@ -40,14 +53,15 @@ export function createRelay(
     throw Error("Local email preview requires a loopback server");
   const browserAuth = new BrowserAuth(
     engine,
-    options.localMailDir ? new LocalMail(options.localMailDir) : undefined
+    options.localMailDir ? new LocalMail(options.localMailDir) : undefined,
+    options.trustProxy
   );
   const allowedOrigins = (req: IncomingMessage) => [
     options.publicOrigin ||
       `http://${options.host || "127.0.0.1"}:${options.port}`,
-    ...(engine.consensus?.options.config.members.map(
-      (m) => new URL(m.url).origin
-    ) || []),
+    ...((
+      options.publicMembers || engine.consensus?.options.config.members
+    )?.map((m) => new URL(m.url).origin) || []),
   ];
   const browserOrigin = (req: IncomingMessage) => {
     const origin = req.headers.origin;
@@ -91,9 +105,9 @@ export function createRelay(
       if (options.demo && !/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host))
         return json(res, 403, { error: "Local demo host required" });
       const peerOrigins =
-        engine.consensus?.options.config.members.map(
-          (m) => new URL(m.url).origin
-        ) || [];
+        (
+          options.publicMembers || engine.consensus?.options.config.members
+        )?.map((m) => new URL(m.url).origin) || [];
       if (
         req.headers.origin &&
         allowedOrigins(req).includes(req.headers.origin)
@@ -124,7 +138,7 @@ export function createRelay(
         return json(res, 410, { error: "Email confirmation is disabled." });
       if (path.startsWith("/api/session/") && req.method === "POST") {
         const origin = browserOrigin(req);
-        limit("login:" + req.socket.remoteAddress);
+        limit("login:" + requestIP(req, options.trustProxy));
         const input = await body(req, 4096);
         if (path === "/api/session/register")
           return json(
@@ -229,11 +243,16 @@ export function createRelay(
           ok: true,
           events: engine.state.timeline.length,
           pending: engine.store.pending().length,
-          network: "localnet",
+          network: engine.chain.network?.network || "localnet",
+          solana: engine.chain.network && {
+            network: engine.chain.network.network,
+            genesis: engine.chain.network.genesis,
+            program: engine.chain.network.program,
+          },
           demo: !!options.demo,
           readOnly: engine.readOnly,
           federation: options.federation?.info(),
-          ha: engine.consensus?.info(),
+          ha: haInfo(),
           stream: engine.store.meta("stream"),
         });
       if (options.demo && path === "/api/demo/actors" && req.method === "GET")
@@ -355,8 +374,28 @@ export function createRelay(
       const files: Record<string, [string, string]> = {
         "/": ["web/landing.html", "text/html"],
         "/landing.css": ["web/landing.css", "text/css"],
+        "/landing.js": ["web/landing.js", "text/javascript"],
+        "/terminal-curvature.png": ["web/terminal-curvature.png", "image/png"],
         "/style.css": ["web/style.css", "text/css"],
+        "/theme.css": ["web/theme.css", "text/css"],
         "/app.js": ["web/app.js", "text/javascript"],
+        ...Object.fromEntries(
+          [
+            "hanken-1",
+            "hanken-2",
+            "hanken-3",
+            "hanken-4",
+            "jetbrains-1",
+            "jetbrains-2",
+            "jetbrains-3",
+            "jetbrains-4",
+            "jetbrains-5",
+            "jetbrains-6",
+          ].map((name) => [
+            "/fonts/" + name + ".woff2",
+            ["web/fonts/" + name + ".woff2", "font/woff2"],
+          ])
+        ),
       };
       if (path === "/favicon.ico") {
         res.writeHead(204);
@@ -373,6 +412,24 @@ export function createRelay(
         (appRoute || missingPage ? ["web/index.html", "text/html"] : undefined);
       if ((req.method === "GET" || req.method === "HEAD") && asset) {
         const [file, mime] = asset;
+        let content: Buffer | string | undefined;
+        if (req.method !== "HEAD") {
+          content = readFileSync(file);
+          if (file === "web/landing.html") {
+            content = content
+              .toString()
+              .replace(
+                "Current release runs on Solana localnet",
+                "Current release runs on Solana " +
+                  (engine.chain.network?.network || "localnet")
+              );
+            if (browserAuth.session(req))
+              content = content.replace(
+                '<a href="/login" class="landing-part-17">Sign in</a>',
+                '<a href="/app" class="landing-part-17">Open App</a>'
+              );
+          }
+        }
         res.writeHead(missingPage ? 404 : 200, {
           "Content-Type": mime + "; charset=utf-8",
           "Cache-Control": "no-store",
@@ -385,7 +442,7 @@ export function createRelay(
               .join(" ") +
             "; style-src 'self'; script-src 'self'; frame-ancestors 'none'",
         });
-        res.end(req.method === "HEAD" ? undefined : readFileSync(file));
+        res.end(content);
         return;
       }
       json(res, 404, { error: "Not found" });
@@ -398,7 +455,7 @@ export function createRelay(
           : (error as any).status || 400,
         {
           error: message,
-          ...(engine.consensus ? { ha: engine.consensus.info() } : {}),
+          ...(engine.consensus ? { ha: haInfo() } : {}),
         }
       );
     }

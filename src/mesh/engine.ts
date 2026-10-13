@@ -140,6 +140,8 @@ export class Engine extends EventEmitter {
       const tx = await this.chain.prepare(event, this.state);
       this.consensus?.assertLeader(term);
       if (!tx) return { transaction: null };
+      await this.chain.preflight?.(tx);
+      this.consensus?.assertLeader(term);
       this.prepared.set(event.id, {
         message: tx.serializeMessage(),
         time: Date.now(),

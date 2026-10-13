@@ -1,0 +1,25 @@
+[Unit]
+Description=ctrl-mesh Devnet leader gateway
+Wants=network-online.target ctrl-mesh@a.service ctrl-mesh@b.service ctrl-mesh@c.service
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=ctrl-mesh
+Group=ctrl-mesh
+WorkingDirectory=/opt/ctrl-mesh/current
+Environment=MESH_HA_CONFIG=/var/lib/ctrl-mesh/devnet/ha/cluster.json
+Environment=PORT=4180
+ExecStart=/opt/ctrl-mesh/node/bin/node dist/production-gateway.js
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

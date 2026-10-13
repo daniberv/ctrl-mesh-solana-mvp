@@ -5,17 +5,23 @@ import {
   SystemProgram,
   Transaction,
   Connection,
+  ComputeBudgetProgram,
 } from "@solana/web3.js";
 import { sha256 } from "@noble/hashes/sha256";
 import { Buffer } from "buffer";
 import type { MeshEvent } from "./events";
 import type { State } from "./state";
+import { verifyDigestSignature } from "./signatures";
 import idl from "../../target/idl/ctrl_mesh_mvp.json";
 const bn = (v: number) => new anchor.BN(v);
 const pk = (v: string | Buffer) => new PublicKey(v);
 const hash = (v: string) => [...Buffer.from(v, "hex")];
 const idNumber = (v: string) =>
   new anchor.BN(Buffer.from(sha256(Buffer.from(v))).subarray(0, 8), "le");
+// One mesh instruction per transaction. Explicit limits prevent wallets from
+// injecting a priority fee after the relay has prepared an exact message.
+export const TRANSACTION_COMPUTE_UNITS = 200_000;
+export const TRANSACTION_MICRO_LAMPORTS = 1_000;
 export function projectAddress(
   owner: string,
   id: string,
@@ -44,7 +50,8 @@ export async function buildTransaction(
   event: MeshEvent,
   state: State,
   program: anchor.Program,
-  sponsor: PublicKey
+  sponsor: PublicKey,
+  computeBudget = true
 ): Promise<Transaction | null> {
   const c = JSON.parse(event.content),
     actor = pk(Buffer.from(event.pubkey, "hex")),
@@ -166,7 +173,17 @@ export async function buildTransaction(
         isSigner: false,
       }))
     );
-  return method.transaction();
+  const transaction: Transaction = await method.transaction();
+  if (computeBudget)
+    transaction.instructions.unshift(
+      ComputeBudgetProgram.setComputeUnitLimit({
+        units: TRANSACTION_COMPUTE_UNITS,
+      }),
+      ComputeBudgetProgram.setComputeUnitPrice({
+        microLamports: TRANSACTION_MICRO_LAMPORTS,
+      })
+    );
+  return transaction;
 }
 
 /** Signers validate the program, exact instruction data, accounts and requested authority before signing a relay-built transaction. */
@@ -211,9 +228,10 @@ export async function verifyPreparedTransaction(
     ).toString("hex");
     if (
       id !== event.id ||
-      !nacl.sign.detached.verify(
-        Buffer.from(id, "hex"),
-        Buffer.from(event.sig, "hex"),
+      !verifyDigestSignature(
+        "event",
+        id,
+        event.sig,
         Buffer.from(event.pubkey, "hex")
       )
     )

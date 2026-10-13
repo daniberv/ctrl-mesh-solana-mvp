@@ -251,12 +251,14 @@ describe("automatic writable failover", function () {
       conn = old.engine.chain.connection;
     const send = conn.sendRawTransaction.bind(conn);
     let triggered = false;
+    let readDuringElection: Promise<any> | undefined;
     conn.sendRawTransaction = async (...args: Parameters<typeof send>) => {
       if (!triggered) {
         triggered = true;
         old.alive = false;
         await old.raft.stop();
         old.relay.server.closeAllConnections();
+        readDuringElection = client(manager).context();
         throw new TypeError("Process died before broadcast");
       }
       return send(...args);
@@ -267,6 +269,7 @@ describe("automatic writable failover", function () {
     );
     const result = await client(workerA).publishEvent(event);
     assert(triggered);
+    assert((await readDuringElection!).jobs.some((j: any) => j.id === job));
     assert.notEqual(index(), i);
     assert.equal(result.event.id, event.id);
     assert(result.receipt.signature);
@@ -461,6 +464,28 @@ describe("automatic writable failover", function () {
     );
     assert.equal(connected.status, 200);
     cookie = connected.headers.getSetCookie()[0].split(";")[0];
+    const extraWallet = Keypair.generate();
+    for (const signer of [extraWallet, owner]) {
+      const challenge = await (
+        await request(
+          "session/challenge",
+          { actor: signer.publicKey.toBase58() },
+          cookie
+        )
+      ).json();
+      const proof = await request(
+        "session/connect",
+        {
+          nonce: challenge.nonce,
+          signature: Buffer.from(
+            nacl.sign.detached(Buffer.from(challenge.message), signer.secretKey)
+          ).toString("hex"),
+        },
+        cookie
+      );
+      assert.equal(proof.status, 200);
+      cookie = proof.headers.getSetCookie()[0].split(";")[0];
+    }
     const first = index();
     await stop(first);
     await until(() => !!leader(), "No replacement for browser session");
@@ -482,13 +507,24 @@ describe("automatic writable failover", function () {
         .account.verified,
       false
     );
+    assert.deepEqual(
+      (
+        await (await request("session", undefined, cookie)).json()
+      ).session.account.wallets.sort(),
+      [owner.publicKey.toBase58(), extraWallet.publicKey.toBase58()].sort()
+    );
     await start(first);
     await sync();
-    for (const n of live())
+    for (const n of live()) {
       assert.equal(
         n.store.accounts.byEmail("ha@example.test")!.wallet,
         owner.publicKey.toBase58()
       );
+      assert.equal(
+        n.store.accounts.walletOwner(extraWallet.publicKey.toBase58()),
+        n.store.accounts.byEmail("ha@example.test")!.id
+      );
+    }
     assert.equal((await request("session/logout", {}, cookie)).status, 200);
     const second = index();
     await stop(second);

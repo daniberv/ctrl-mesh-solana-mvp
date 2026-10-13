@@ -8,6 +8,9 @@ skip-lint = false
 [programs.localnet]
 ctrl_mesh_mvp = "F6eKaEwArFVNWphDWbzawQmnboAVr8XWwDHY8FkzJ2Qi"
 
+[programs.devnet]
+ctrl_mesh_mvp = "F6eKaEwArFVNWphDWbzawQmnboAVr8XWwDHY8FkzJ2Qi"
+
 [registry]
 url = "https://api.apr.dev"
 

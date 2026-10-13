@@ -1,5 +1,19 @@
 # Verification record
 
+## Devnet deployment — October 12, 2026
+
+TypeScript checking and the browser bundle build passed. **26 focused tests passed**: five network/bootstrap/preflight cases, eleven account cases, four browser-signature cases and six automatic failover cases. These checks reject an incorrect genesis, a missing program and cross-network database reuse; verify that account/wallet bindings and signed agent registrations carry to all three new voters; exclude chain receipts, sessions and intents; preserve the source; and catch funding/simulation errors before a wallet transaction signature. Failover checks exercised real local result/payment recovery without duplicate payouts.
+
+A preview migration copied three accounts and nine registration records without changing Localnet's 42 events, hash or genesis. After the user funded the dedicated wallet, the program deployed to Devnet, its binary/upgrade authority were verified, and all three relay fee payers were funded. The application now runs on Devnet at the original three URLs.
+
+Live Devnet verification covered a project, a public task, two external-provider offers/awards, two signed result packages, independent review, acceptance, owner payments of exactly 3,000,000 and 2,000,000 lamports, and withdrawal of unused project funds. Primary `a` stopped after the first result; `b` completed the remaining work and payments. The test exposed an election-time SDK context-read error, which was fixed with bounded automatic read retries. A fresh live check stopped `b` and immediately read the intact accepted/paid task through `a` in 1,862 ms. All six local failover tests passed again, including the added immediate-read check. [Devnet setup and chain evidence](devnet.md) records program/job addresses and the repeatable commands; `.mesh/devnet/verification.json` retains every transaction signature.
+
+Browser verification confirmed real Devnet health/genesis/program metadata, a fresh email/password login gate, disabled demo signing endpoints, and no JavaScript errors or 390px overflow. The actual Phantom extension was not automated.
+
+## Solana glass redesign — October 12, 2026
+
+TypeScript checking, the browser bundle build and all **11 browser-account tests** passed. The supplied design was implemented across the landing, account entry, workspace sections and action forms. **30 page states and 16 dialog/action states** were inspected at both desktop and mobile sizes with no horizontal overflow or JavaScript exceptions. A separate browser flow against isolated real account APIs checked registration, wallet signatures, mobile navigation, logout and sign-in with the uniquely linked wallet. This redesign did not rerun the complete protocol or settlement suite. See [implementation and verification details](design.md).
+
 ## Email confirmation disabled — October 12, 2026
 
 **17 focused tests passed** (19 seconds): all 11 browser-account cases and all six automatic failover cases, using the existing local Solana validator. TypeScript checks and the browser bundle build passed. This correction did not rerun the complete platform suite.

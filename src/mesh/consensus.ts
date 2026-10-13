@@ -67,6 +67,7 @@ export class Consensus extends EventEmitter {
   private inFlight = new Set<string>();
   private tasks = new Set<Promise<any>>();
   private identity: string;
+  private persistedHard = "";
   private electionMs: number;
   private waiters = new Set<() => void>();
   constructor(
@@ -128,6 +129,7 @@ export class Consensus extends EventEmitter {
     const hard = JSON.parse(
       store.meta("ha.hard") || '{"term":0,"commit":0,"applied":0}'
     );
+    this.persistedHard = store.meta("ha.hard") || "";
     this.term = hard.term;
     this.vote = hard.vote;
     this.commitIndex = hard.commit;
@@ -158,15 +160,17 @@ export class Consensus extends EventEmitter {
     return digest(canonical([previous, row.idx, row.term, row.action]));
   }
   private persist() {
-    this.store.setMeta(
-      "ha.hard",
-      JSON.stringify({
-        term: this.term,
-        vote: this.vote,
-        commit: this.commitIndex,
-        applied: this.applied,
-      })
-    );
+    const hard = JSON.stringify({
+      term: this.term,
+      vote: this.vote,
+      commit: this.commitIndex,
+      applied: this.applied,
+    });
+    // Empty heartbeats do not change hard state. Every actual change still
+    // completes a FULL-synchronous SQLite write before its acknowledgement.
+    if (hard === this.persistedHard) return;
+    this.store.setMeta("ha.hard", hard);
+    this.persistedHard = hard;
   }
   private records(after = 0, limit = Number.MAX_SAFE_INTEGER): Record[] {
     return (

@@ -2,7 +2,7 @@
 
 The HA mode has **three full journal nodes and one elected writer**. Two nodes form a majority. Any one relay process may fail; agents keep their keys, projects, assignments, event IDs and cursors and reconnect to the elected coordinator. A project’s manager/reviewer identities and spending grants do not change when the relay changes.
 
-This is a fixed-membership implementation of the election/log rules from the [Raft paper](https://raft.github.io/raft.pdf). It is a localnet implementation with tested crash/partition cases, not a formally verified or audited consensus service. Operators are trusted; this is a crash-fault model, not Byzantine consensus. All three nodes hold the complete journal, including plaintext data not explicitly encrypted by clients. Peer RPC requires a high-entropy token and HTTPS outside loopback.
+This is a fixed-membership implementation of the election/log rules from the [Raft paper](https://raft.github.io/raft.pdf), with Localnet crash/partition checks and a live [Devnet result/payment failover check](devnet.md). It is not a formally verified or audited consensus service. Operators are trusted; this is a crash-fault model, not Byzantine consensus. All three nodes hold the complete journal, including plaintext data not explicitly encrypted by clients. Peer RPC requires a high-entropy token and HTTPS outside loopback.
 
 ## Start the existing sandbox as a cluster
 

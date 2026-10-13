@@ -5,6 +5,8 @@ import { join } from "path";
 import { Keypair } from "@solana/web3.js";
 import nacl from "tweetnacl";
 import { WebSocket } from "ws";
+import { DatabaseSync } from "node:sqlite";
+import { Accounts } from "../src/mesh/accounts";
 import { Engine } from "../src/mesh/engine";
 import { Chain } from "../src/mesh/chain";
 import { Store } from "../src/mesh/store";
@@ -22,12 +24,13 @@ describe("email accounts, wallet binding and navigation", function () {
   this.timeout(20000);
   const url = "http://127.0.0.1:4221",
     actor = Keypair.generate(),
+    secondary = Keypair.generate(),
     stranger = Keypair.generate();
   const directory = mkdtempSync(join(tmpdir(), "mesh-auth-")),
     file = join(directory, "events.sqlite"),
     mail = join(directory, "mail");
   const email = "builder@example.test",
-    password = "a long unique passphrase for tests";
+    password = "testpass";
   let store: Store,
     engine: Engine,
     relay: ReturnType<typeof createRelay>,
@@ -107,6 +110,7 @@ describe("email accounts, wallet binding and navigation", function () {
     const landing = await (await request("/")).text();
     assert.match(landing, /Build beyond one agent/);
     assert(!landing.includes('src="/app.js"'));
+    assert.match(landing, /<a href="\/login"[^>]*>Sign in<\/a>/);
     for (const path of [
       "/app",
       "/app/projects",
@@ -188,7 +192,7 @@ describe("email accounts, wallet binding and navigation", function () {
   });
   it("registers without mail, hashes the password and requires wallet proof", async () => {
     assert.equal(
-      (await post("register", { email, password: "short" })).status,
+      (await post("register", { email, password: "1234567" })).status,
       400
     );
     const r = await post("register", {
@@ -205,6 +209,10 @@ describe("email accounts, wallet binding and navigation", function () {
     assert.equal(s.account.email, email);
     assert.equal(s.account.verified, false);
     assert.equal(s.actor, "");
+    assert.match(
+      await (await request("/")).text(),
+      /<a href="\/app"[^>]*>Open App<\/a>/
+    );
     assert.match(
       store.accounts.byEmail(email)!.password,
       /^scrypt:131072:8:1:/
@@ -296,12 +304,35 @@ describe("email accounts, wallet binding and navigation", function () {
       Date.now = realNow;
     }
   });
-  it("keeps the email-wallet pair unique, including concurrent claims", async () => {
-    assert.equal(
-      (await post("challenge", { actor: stranger.publicKey.toBase58() }))
-        .status,
-      409
+  it("adds multiple wallets to one account and switches only the active signer", async () => {
+    const first = cookie;
+    const r = await connect(secondary);
+    const s = await r.json();
+    assert.equal(s.account.id, accountId);
+    assert.equal(s.account.wallet, actor.publicKey.toBase58());
+    assert.equal(s.actor, secondary.publicKey.toBase58());
+    assert.deepEqual(
+      s.account.wallets.sort(),
+      [actor, secondary].map((k) => k.publicKey.toBase58()).sort()
     );
+    assert.equal((await request("/api/context", undefined, first)).status, 401);
+    assert.equal((await request("/api/context")).status, 200);
+    const wrongActor = signEvent(actor, {
+      action: "progress",
+      project: "missing",
+      job: "missing",
+      message: "old signer",
+    });
+    assert.match(
+      (await (await request("/api/prepare", { event: wrongActor })).json())
+        .error,
+      /Actor does not match/
+    );
+    await connect();
+    await connect();
+    assert.equal(store.accounts.wallets(accountId).length, 2);
+  });
+  it("keeps each wallet exclusive to its account, including concurrent claims", async () => {
     const firstCookie = cookie;
     const r = await post("register", {
       email: "second@example.test",
@@ -319,6 +350,16 @@ describe("email accounts, wallet binding and navigation", function () {
       409
     );
     assert.equal(store.accounts.byEmail("second@example.test")!.wallet, null);
+    const secondaryChallenge = await challenge(secondary);
+    assert.equal(
+      (
+        await post("connect", {
+          nonce: secondaryChallenge.nonce,
+          signature: signature(secondaryChallenge.message, secondary),
+        })
+      ).status,
+      409
+    );
     // Two accounts race for a previously unclaimed wallet.
     const secondCookie = cookie;
     const third = await post(
@@ -345,7 +386,7 @@ describe("email accounts, wallet binding and navigation", function () {
     assert.deepEqual(results.map((r) => r.status).sort(), [200, 409]);
     assert.equal(
       store.db
-        .prepare("SELECT COUNT(*) AS n FROM accounts WHERE wallet=?")
+        .prepare("SELECT COUNT(*) AS n FROM account_wallets WHERE wallet=?")
         .get(stranger.publicKey.toBase58())!.n,
       1
     );
@@ -359,6 +400,11 @@ describe("email accounts, wallet binding and navigation", function () {
     await start();
     assert.equal((await request("/api/context")).status, 200);
     assert.equal(
+      store.accounts.walletOwner(secondary.publicKey.toBase58()),
+      accountId
+    );
+    assert.equal(store.accounts.wallets(accountId).length, 2);
+    assert.equal(
       (await post("login", { email, password: "wrong" })).status,
       401
     );
@@ -370,6 +416,10 @@ describe("email accounts, wallet binding and navigation", function () {
     assert.equal((await r.json()).actor, "");
     assert.notEqual(saved, cookie);
     assert.equal((await request("/api/context", undefined, saved)).status, 401);
+    assert.match(
+      await (await request("/", undefined, saved)).text(),
+      /<a href="\/login"[^>]*>Sign in<\/a>/
+    );
     assert.equal((await request("/api/context")).status, 403);
     await connect();
   });
@@ -429,7 +479,11 @@ describe("email accounts, wallet binding and navigation", function () {
         readFileSync(join(mail, accountId + "-reset.json"), "utf8")
       ),
       token = new URL(message.url).searchParams.get("token");
-    const next = "another unrelated test passphrase";
+    const next = "newpass8";
+    assert.equal(
+      (await post("reset", { token, password: "1234567" }, "")).status,
+      400
+    );
     assert.equal(
       (await post("reset", { token, password: next }, "")).status,
       200
@@ -443,6 +497,7 @@ describe("email accounts, wallet binding and navigation", function () {
       store.accounts.byEmail(email)!.wallet,
       actor.publicKey.toBase58()
     );
+    assert.equal(store.accounts.wallets(accountId).length, 2);
     await connect();
   });
   it("revokes durable cookies on logout, expires sessions and denies foreign sockets", async () => {
@@ -480,5 +535,36 @@ describe("email accounts, wallet binding and navigation", function () {
       (await post("login", { email: "rate@example.test", password })).status,
       429
     );
+  });
+  it("migrates a legacy wallet binding without losing its authorized session", () => {
+    const db = new DatabaseSync(":memory:");
+    try {
+      db.exec(
+        "CREATE TABLE accounts(id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,password TEXT NOT NULL,verified INTEGER NOT NULL DEFAULT 0,wallet TEXT UNIQUE,created INTEGER NOT NULL); CREATE TABLE account_sessions(hash TEXT PRIMARY KEY,account_id TEXT NOT NULL,wallet TEXT,expires INTEGER NOT NULL,revoked INTEGER NOT NULL DEFAULT 0);"
+      );
+      const address = actor.publicKey.toBase58();
+      db.prepare("INSERT INTO accounts VALUES(?,?,?,?,?,?)").run(
+        "legacy",
+        "legacy@example.test",
+        "hashed",
+        0,
+        address,
+        1
+      );
+      db.prepare("INSERT INTO account_sessions VALUES(?,?,?,?,?)").run(
+        "legacy-cookie",
+        "legacy",
+        address,
+        Date.now() + 10000,
+        0
+      );
+      const accounts = new Accounts(db);
+      assert.deepEqual(accounts.wallets("legacy"), [address]);
+      assert.equal(accounts.session("legacy-cookie")!.actor, address);
+      new Accounts(db);
+      assert.equal(accounts.wallets("legacy").length, 1);
+    } finally {
+      db.close();
+    }
   });
 });

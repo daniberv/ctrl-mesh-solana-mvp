@@ -85,6 +85,24 @@ export class MeshClient {
   private async read<T>(
     fn: (client: MeshClient, health?: any) => Promise<T>
   ): Promise<T> {
+    const until = Date.now() + (this.options.failoverMs ?? 30000);
+    for (;;) {
+      try {
+        return await this.readOnce(fn);
+      } catch (e) {
+        const temporary =
+          e instanceof TypeError ||
+          e instanceof DOMException ||
+          (e instanceof HttpError && e.status >= 500);
+        if (!this.options.replicas?.length || !temporary || Date.now() >= until)
+          throw e;
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+    }
+  }
+  private async readOnce<T>(
+    fn: (client: MeshClient, health?: any) => Promise<T>
+  ): Promise<T> {
     if (!this.options.replicas?.length) {
       const health = await this.request("/api/health");
       if (

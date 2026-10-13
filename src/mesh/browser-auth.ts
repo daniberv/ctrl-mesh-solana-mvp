@@ -6,6 +6,7 @@ import { Engine } from "./engine";
 import { authError } from "./accounts";
 import { checkPassword, hashPassword, normalizeEmail } from "./passwords";
 import { LocalMail } from "./local-mail";
+import { requestIP } from "./request-ip";
 
 const hash = (value: string) =>
   createHash("sha256").update(value).digest("hex");
@@ -25,7 +26,11 @@ export class BrowserAuth {
     }
   >();
   readonly cookieName: string;
-  constructor(private engine: Engine, private mail?: LocalMail) {
+  constructor(
+    private engine: Engine,
+    private mail?: LocalMail,
+    private trustProxy = false
+  ) {
     // A new namespace deliberately invalidates old wallet-only browser sessions.
     this.cookieName =
       "mesh_account_" + hash(engine.store.meta("stream")!).slice(0, 12);
@@ -65,7 +70,7 @@ export class BrowserAuth {
     const s = this.requireSession(req);
     if (!s.actor)
       throw authError(
-        "Connect and verify your linked wallet to open the workspace.",
+        "Connect and verify a wallet for this account to open the workspace.",
         403
       );
     return s.actor;
@@ -103,7 +108,11 @@ export class BrowserAuth {
     origin: string
   ) {
     const email = normalizeEmail(input.email);
-    await this.attempt("register:" + req.socket.remoteAddress, 10, 60 * 60000);
+    await this.attempt(
+      "register:" + requestIP(req, this.trustProxy),
+      10,
+      60 * 60000
+    );
     const password = await hashPassword(input.password),
       accountId = randomUUID(),
       session = random(),
@@ -187,8 +196,6 @@ export class BrowserAuth {
     const s = this.requireSession(req);
     const actor = new PublicKey(input.actor).toBase58();
     if (actor !== input.actor) throw authError("Invalid wallet address");
-    if (s.account.wallet && s.account.wallet !== actor)
-      throw authError("Use the wallet already linked to this account.", 409);
     const now = Date.now();
     for (const [id, c] of this.challenges)
       if (c.expires < now) this.challenges.delete(id);

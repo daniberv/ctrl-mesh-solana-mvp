@@ -6,7 +6,10 @@ import {
   PublicKey,
   SystemProgram,
   Transaction,
+  VersionedTransaction,
+  ComputeBudgetProgram,
 } from "@solana/web3.js";
+import { NetworkInfo } from "./network";
 import { readFileSync } from "fs";
 import {
   address,
@@ -27,6 +30,7 @@ export class Chain {
   connection: Connection;
   program: anchor.Program;
   sponsor: Keypair;
+  network?: NetworkInfo;
   constructor(rpc: string, sponsor: Keypair) {
     this.sponsor = sponsor;
     this.connection = new Connection(rpc, "confirmed");
@@ -71,6 +75,36 @@ export class Chain {
     tx.feePayer = this.sponsor.publicKey;
     tx.recentBlockhash = (await this.connection.getLatestBlockhash()).blockhash;
     return tx;
+  }
+  async preflight(tx: Transaction) {
+    if (this.network?.network !== "devnet") return;
+    const fee = (
+      await this.connection.getFeeForMessage(tx.compileMessage(), "confirmed")
+    ).value;
+    if (fee === null)
+      throw Error("Devnet blockhash expired; prepare the transaction again");
+    if ((await this.connection.getBalance(this.sponsor.publicKey)) < fee)
+      throw Error(
+        "The Devnet relay fee payer needs test SOL. Contact the workspace operator."
+      );
+    const simulation = await this.connection.simulateTransaction(
+      new VersionedTransaction(tx.compileMessage()),
+      {
+        sigVerify: false,
+        replaceRecentBlockhash: true,
+        commitment: "confirmed",
+      }
+    );
+    if (simulation.value.err) {
+      const detail = simulation.value.logs
+        ?.filter((line) => /Error Message:|insufficient|failed:/i.test(line))
+        .slice(-3)
+        .join(" ");
+      throw Error(
+        "Devnet transaction simulation failed: " +
+          (detail || JSON.stringify(simulation.value.err))
+      );
+    }
   }
   async receipt(event: MeshEvent, signature: string): Promise<Receipt> {
     const c = verifyEvent(event),
@@ -149,7 +183,12 @@ export class Chain {
       event,
       state,
       this.program,
-      tx.feePayer!
+      tx.feePayer!,
+      // Journals from before explicit fee preparation remain verifiable.
+      // Any present budget still has to match our exact limit and price.
+      tx.instructions.some((ix) =>
+        ix.programId.equals(ComputeBudgetProgram.programId)
+      )
     ))!;
     rebuilt.feePayer = tx.feePayer;
     rebuilt.recentBlockhash = tx.recentBlockhash;

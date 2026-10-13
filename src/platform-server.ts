@@ -9,6 +9,7 @@ import { demoControl, localKey } from "./mesh/demo";
 import { Federation } from "./mesh/federation";
 import { ClusterConfig, Consensus } from "./mesh/consensus";
 import { lockDatabase } from "./mesh/process-lock";
+import { inspectNetwork, networkConfig, pinNetwork } from "./mesh/network";
 async function main() {
   const haConfig: ClusterConfig | undefined = process.env.MESH_HA_CONFIG
     ? JSON.parse(readFileSync(process.env.MESH_HA_CONFIG, "utf8"))
@@ -21,9 +22,11 @@ async function main() {
     host = process.env.MESH_HOST || "127.0.0.1";
   if (demo && host !== "127.0.0.1")
     throw Error("Sandbox role controls must remain loopback-only");
-  const rpc = process.env.SOLANA_RPC || "http://127.0.0.1:8899";
-  if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(rpc))
-    throw Error("This release is restricted to a local validator");
+  const network = networkConfig();
+  if (demo && network.network !== "localnet")
+    throw Error("Sandbox role signing controls are only available on Localnet");
+  if (network.network === "devnet" && !process.env.MESH_DB)
+    throw Error("Devnet requires a separate MESH_DB; start yarn devnet:start");
   const replica = !!process.env.MESH_UPSTREAM;
   if (haConfig && replica)
     throw Error("HA voters cannot also pull a legacy upstream");
@@ -51,9 +54,15 @@ async function main() {
     (replica ? ".mesh/replica.sqlite" : ".mesh/events.sqlite");
   const unlock = haConfig ? lockDatabase(dbPath) : undefined;
   process.once("exit", () => unlock?.());
-  const chain = new Chain(rpc, sponsor),
-    store = new Store(dbPath),
-    engine = new Engine(store, chain, replica, !!haConfig);
+  const chain = new Chain(network.rpc, sponsor);
+  chain.network = await inspectNetwork(
+    chain.connection,
+    network,
+    chain.program.programId
+  );
+  const store = new Store(dbPath);
+  pinNetwork(store, chain.network);
+  const engine = new Engine(store, chain, replica, !!haConfig);
   if (haConfig) {
     if (
       (await chain.connection.getGenesisHash()) !== haConfig.genesis ||
@@ -69,6 +78,18 @@ async function main() {
           process.env.MESH_HA_TOKEN_FILE || ".mesh/ha/peer.token",
           "utf8"
         ).trim(),
+        electionMs: process.env.MESH_HA_ELECTION_MS
+          ? Number(process.env.MESH_HA_ELECTION_MS)
+          : undefined,
+        requestMs: process.env.MESH_HA_REQUEST_MS
+          ? Number(process.env.MESH_HA_REQUEST_MS)
+          : undefined,
+        heartbeatMs: process.env.MESH_HA_HEARTBEAT_MS
+          ? Number(process.env.MESH_HA_HEARTBEAT_MS)
+          : undefined,
+        proposalMs: process.env.MESH_HA_PROPOSAL_MS
+          ? Number(process.env.MESH_HA_PROPOSAL_MS)
+          : undefined,
       },
       (action) => engine.applyConsensus(action)
     );
@@ -114,8 +135,14 @@ async function main() {
     host,
     federation,
     publicOrigin: process.env.MESH_PUBLIC_ORIGIN,
+    publicMembers: process.env.MESH_PUBLIC_MEMBERS_FILE
+      ? JSON.parse(readFileSync(process.env.MESH_PUBLIC_MEMBERS_FILE, "utf8"))
+      : undefined,
+    trustProxy: process.env.MESH_TRUST_PROXY === "1",
     localMailDir:
-      demo || process.env.MESH_MAIL_MODE === "local" ? ".mesh/mail" : undefined,
+      demo || process.env.MESH_MAIL_MODE === "local"
+        ? process.env.MESH_MAIL_DIR || ".mesh/mail"
+        : undefined,
     ...(demo
       ? {
           demo: demoControl(
@@ -201,7 +228,7 @@ async function main() {
   }, 3000);
   console.log(`ctrl-mesh platform: http://${host}:${port}`);
   console.log(
-    `Signed relay, durable journal, real localnet settlement. Sandbox roles: ${demo}`
+    `Signed relay, durable journal, ${network.network} settlement (${chain.network.genesis}). Sandbox roles: ${demo}`
   );
   let closing = false;
   const close = async () => {

@@ -34,8 +34,8 @@ export function normalizeEmail(value: unknown) {
   return email;
 }
 export function validatePassword(value: unknown): asserts value is string {
-  if (typeof value !== "string" || value.length < 15 || value.length > 128)
-    throw authError("Use a password between 15 and 128 characters.");
+  if (typeof value !== "string" || value.length < 8 || value.length > 128)
+    throw authError("Use a password between 8 and 128 characters.");
 }
 export async function hashPassword(password: unknown) {
   validatePassword(password);

@@ -9,6 +9,7 @@
     "mesh": "ts-node src/mesh-cli.ts",
     "typecheck": "tsc --noEmit",
     "build:web": "esbuild web/frontend.ts --bundle --platform=browser --format=iife --minify --outfile=web/app.js",
+    "build:server": "tsc -p tsconfig.server.json",
     "test": "anchor test",
     "mcp": "ts-node src/mcp-server.ts",
     "demo:agents": "ts-node scripts/demo-multi-agent.ts",
@@ -18,7 +19,14 @@
     "federation:check": "ts-node scripts/check-replicas.ts",
     "ha:bootstrap": "ts-node scripts/ha-bootstrap.ts",
     "ha:demo": "ts-node scripts/ha-demo.ts",
-    "ha:status": "ts-node scripts/ha-status.ts"
+    "ha:status": "ts-node scripts/ha-status.ts",
+    "devnet:prepare": "ts-node scripts/devnet.ts prepare",
+    "devnet:deploy": "ts-node scripts/devnet.ts deploy",
+    "devnet:bootstrap": "ts-node scripts/devnet.ts bootstrap",
+    "devnet:start": "ts-node scripts/devnet.ts start",
+    "devnet:status": "ts-node scripts/devnet.ts status",
+    "devnet:ha-status": "MESH_HA_CONFIG=.mesh/devnet/ha/cluster.json ts-node scripts/ha-status.ts",
+    "devnet:verify": "ts-node scripts/devnet-smoke.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.31.1",

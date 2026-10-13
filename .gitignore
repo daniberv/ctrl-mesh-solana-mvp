@@ -17,5 +17,7 @@ test-ledger
 .mesh-backups/
 
 /web/app.js
+/dist/
+/deployment-artifacts/
 
 .superdesign/tmp/

@@ -59,7 +59,9 @@ export type AccountSession = {
     id: string;
     email: string;
     verified: boolean;
+    // The first wallet is retained for compatibility with older clients.
     wallet: string | null;
+    wallets: string[];
   };
   actor: string;
   expires: number;
@@ -72,6 +74,9 @@ export class Accounts {
   constructor(private db: DatabaseSync) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS accounts(id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,password TEXT NOT NULL,verified INTEGER NOT NULL DEFAULT 0,wallet TEXT UNIQUE,created INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS account_wallets(wallet TEXT PRIMARY KEY,account_id TEXT NOT NULL REFERENCES accounts(id),created INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS account_wallets_account ON account_wallets(account_id);
+      INSERT OR IGNORE INTO account_wallets(wallet,account_id,created) SELECT wallet,id,created FROM accounts WHERE wallet IS NOT NULL;
       CREATE TABLE IF NOT EXISTS account_sessions(hash TEXT PRIMARY KEY,account_id TEXT NOT NULL REFERENCES accounts(id),wallet TEXT,expires INTEGER NOT NULL,revoked INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS account_tokens(hash TEXT PRIMARY KEY,account_id TEXT NOT NULL REFERENCES accounts(id),purpose TEXT NOT NULL,expires INTEGER NOT NULL,used INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS account_attempts(key TEXT PRIMARY KEY,count INTEGER NOT NULL,until INTEGER NOT NULL);
@@ -88,6 +93,22 @@ export class Accounts {
       | Account
       | undefined;
   }
+  wallets(accountId: string): string[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT wallet FROM account_wallets WHERE account_id=? ORDER BY created,wallet"
+        )
+        .all(accountId) as { wallet: string }[]
+    ).map((row) => row.wallet);
+  }
+  walletOwner(wallet: string): string | undefined {
+    return (
+      this.db
+        .prepare("SELECT account_id FROM account_wallets WHERE wallet=?")
+        .get(wallet) as { account_id: string } | undefined
+    )?.account_id;
+  }
   session(hash: string, now = Date.now()): AccountSession | undefined {
     const row = this.db
       .prepare(
@@ -101,8 +122,13 @@ export class Accounts {
             email: row.email,
             verified: !!row.verified,
             wallet: row.wallet,
+            wallets: this.wallets(row.id),
           },
-          actor: row.wallet === row.session_wallet ? row.wallet || "" : "",
+          actor:
+            row.session_wallet &&
+            this.walletOwner(row.session_wallet) === row.id
+              ? row.session_wallet
+              : "",
           expires: row.expires,
         }
       : undefined;
@@ -132,12 +158,8 @@ export class Accounts {
         account = this.byId(c.accountId);
       if (!session || !account || session.account.id !== c.accountId)
         throw authError("Authentication required", 401);
-      if (account.wallet && account.wallet !== c.wallet)
-        throw authError("Use the wallet already linked to this account.", 409);
-      const owner = this.db
-        .prepare("SELECT id FROM accounts WHERE wallet=?")
-        .get(c.wallet) as any;
-      if (owner && owner.id !== account.id)
+      const owner = this.walletOwner(c.wallet);
+      if (owner && owner !== account.id)
         throw authError(
           "This wallet is already linked to another account.",
           409
@@ -216,7 +238,12 @@ export class Accounts {
         revoked.push(c.session);
       } else if (c.op === "wallet") {
         this.db
-          .prepare("UPDATE accounts SET wallet=? WHERE id=?")
+          .prepare(
+            "INSERT INTO account_wallets(wallet,account_id,created) VALUES(?,?,?) ON CONFLICT(wallet) DO NOTHING"
+          )
+          .run(c.wallet, c.accountId, action.now);
+        this.db
+          .prepare("UPDATE accounts SET wallet=COALESCE(wallet,?) WHERE id=?")
           .run(c.wallet, c.accountId);
         session(c.wallet);
       } else if (c.op === "token")

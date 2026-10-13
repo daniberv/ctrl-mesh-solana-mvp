@@ -19,6 +19,7 @@ import {
   View,
 } from "../src/routes";
 import type { AccountSession } from "../src/mesh/accounts";
+import { walletSigningMessage } from "../src/mesh/signatures";
 (globalThis as any).Buffer = Buffer;
 const $ = (id: string) => document.getElementById(id)!;
 const escape = (v: any) =>
@@ -97,6 +98,7 @@ function resolveWorkspace() {
   view = "projects";
 }
 function navigate(path: string, replace = false) {
+  setSidebarOpen(false);
   if (location.pathname + location.search !== path)
     history[replace ? "replaceState" : "pushState"](null, "", path);
   readLocation();
@@ -108,6 +110,7 @@ function navigate(path: string, replace = false) {
   window.scrollTo(0, 0);
 }
 window.addEventListener("popstate", () => {
+  setSidebarOpen(false);
   readLocation();
   if (contextReady) {
     resolveWorkspace();
@@ -153,7 +156,7 @@ async function nodeRequest(
       ...(bearer ? { Authorization: "Bearer " + bearer } : {}),
     },
     body: data === undefined ? undefined : JSON.stringify(data),
-    signal: AbortSignal.timeout(7000),
+    signal: AbortSignal.timeout(20000),
     redirect: "error",
     credentials: "include",
   });
@@ -214,7 +217,10 @@ async function api(path: string, data?: any): Promise<any> {
     if (path === "health" && result.ha && !cluster) {
       cluster = result.ha.cluster;
       stream = result.stream;
-      relayURLs = result.ha.members.map((m: any) => new URL(m.url).origin);
+      relayURLs = result.ha.members.map((m: any) => {
+        const url = new URL(m.url);
+        return url.origin + url.pathname.replace(/\/+$/, "");
+      });
       // Allow first load during an election to establish an identity and the
       // reconnect loop; the app must not remain empty until a manual reload.
       health = result;
@@ -262,7 +268,10 @@ async function signed(command: any) {
     id = await sha(
       JSON.stringify([0, pubkey, created_at, kind, tags, content])
     );
-  const sig = await wallet.signMessage(Buffer.from(id, "hex"), "utf8");
+  const sig = await wallet.signMessage(
+    walletSigningMessage("event", id),
+    "utf8"
+  );
   return {
     id,
     pubkey,
@@ -274,17 +283,28 @@ async function signed(command: any) {
   };
 }
 async function authenticate() {
+  await revokeWalletAccess();
   token = "";
   const result = await api("session");
   session = result.session;
   key = session?.actor || "";
+  if (key) {
+    const provider = preferredWallet();
+    bindWallet(provider);
+    // Restore account-change tracking after a reload without opening the wallet.
+    if (provider?.publicKey) walletListener?.(provider.publicKey);
+  }
   $("identity-key").textContent = short(key);
   startStream();
   await refresh();
 }
 let identityRevision = 0,
   logoutPending = false,
-  authBusy = false;
+  authBusy = false,
+  walletAuthError = "",
+  walletAuthNotice = "",
+  walletNeedsDisconnect = false,
+  walletRevocationPending: Promise<void> | undefined;
 function clearIdentity() {
   identityRevision++;
   clearTimeout(reconnect);
@@ -297,6 +317,9 @@ function clearIdentity() {
   key = "";
   token = "";
   session = null;
+  walletAuthError = "";
+  walletAuthNotice = "";
+  walletNeedsDisconnect = false;
   sessionStorage.removeItem("mesh-demo-role");
   context = { projects: [], jobs: [], agents: [], offers: [] };
   entries = [];
@@ -332,6 +355,28 @@ function walletProviders(): { id: string; name: string; provider: any }[] {
   );
 }
 let walletListener: ((address?: any) => void) | undefined;
+function preferredWallet() {
+  const providers = walletProviders();
+  return (
+    providers.find((p) => p.id === localStorage.getItem("mesh-wallet")) ||
+    providers[0]
+  )?.provider;
+}
+const linkedWallets = () =>
+  session?.account.wallets ||
+  (session?.account.wallet ? [session.account.wallet] : []);
+async function revokeWalletAccess() {
+  if (!walletNeedsDisconnect) return;
+  if (!walletRevocationPending)
+    walletRevocationPending = api("session/disconnect", {})
+      .then(() => {
+        walletNeedsDisconnect = false;
+      })
+      .finally(() => {
+        walletRevocationPending = undefined;
+      });
+  await walletRevocationPending;
+}
 function bindWallet(provider: any) {
   if (wallet && walletListener) {
     wallet.removeListener?.("accountChanged", walletListener);
@@ -344,16 +389,27 @@ function bindWallet(provider: any) {
       const saved = session;
       clearIdentity();
       session = { ...saved, actor: "" };
+      walletAuthNotice = address
+        ? `Wallet changed to ${address.toBase58()}. Connect and sign to use it with this account. Your other wallets and agents stay linked.`
+        : "Wallet disconnected. Connect and verify a wallet to continue.";
+      walletNeedsDisconnect = true;
+      // Reauthorization must wait for this write, so a delayed disconnect cannot
+      // revoke the new wallet session or invalidate its challenge.
+      const revocation = revokeWalletAccess();
       navigate(
         authPath(
           "/app/connect-wallet",
-          safeReturnPath(location.pathname + location.search)
+          route.view === "connect"
+            ? nextPath()
+            : safeReturnPath(location.pathname + location.search)
         ),
         true
       );
-      api("session/disconnect", {}).catch((e) =>
-        toast("Wallet access could not be revoked: " + e.message)
-      );
+      revocation.catch((e) => {
+        walletAuthError = "Wallet access could not be revoked: " + e.message;
+        if (route.view === "connect") render();
+        else toast(walletAuthError);
+      });
     }
   };
   wallet?.on?.("accountChanged", walletListener);
@@ -361,23 +417,27 @@ function bindWallet(provider: any) {
 }
 async function ensureWallet() {
   if (!session || !key) throw Error("Sign in with your wallet first");
-  const provider =
-    wallet ||
-    walletProviders().find((p) => p.id === localStorage.getItem("mesh-wallet"))
-      ?.provider ||
-    walletProviders()[0]?.provider;
+  const provider = wallet || preferredWallet();
   if (!provider)
     throw Error(
       "Open this page in the browser where your Solana wallet is installed."
     );
+  const expected = key;
   await provider.connect();
-  if (provider.publicKey?.toBase58() !== key)
+  if (provider.publicKey?.toBase58() !== expected) {
+    walletListener?.(provider.publicKey);
     throw Error(
-      "This wallet is different from your signed-in account. Switch the wallet account or sign out first."
+      "Wallet changed. Connect and verify the selected wallet before signing work."
+    );
+  }
+  if (key !== expected)
+    throw Error(
+      "Wallet session changed. Connect and verify your wallet again."
     );
   bindWallet(provider);
 }
 async function loginWallet(providerId: string) {
+  await revokeWalletAccess();
   const provider = walletProviders().find((p) => p.id === providerId)?.provider;
   if (!provider)
     throw Error(
@@ -385,7 +445,9 @@ async function loginWallet(providerId: string) {
     );
   const next = safeReturnPath(new URLSearchParams(location.search).get("next"));
   await provider.connect();
-  const actor = provider.publicKey.toBase58();
+  await revokeWalletAccess();
+  const actor = provider.publicKey?.toBase58();
+  if (!actor) throw Error("Wallet did not connect. Unlock it and try again.");
   await selectRelay();
   const challenge = await api("session/challenge", { actor });
   // The wallet must see the actual page origin, even when a backup serves the API.
@@ -414,6 +476,7 @@ async function logout() {
   // visible retry action; it must never be described as a completed logout.
   logoutPending = true;
   try {
+    await revokeWalletAccess();
     await api("session/logout", {});
   } catch (e) {
     render();
@@ -514,9 +577,18 @@ async function publish(command: any) {
       }
       let transaction;
       if (p.transaction) {
+        if (health.network === "localnet" && wallet.isPhantom)
+          throw Error(
+            "This workspace uses Solana Localnet. Phantom supports Devnet and Testnet, so it cannot simulate this local transaction. Your Devnet SOL balance is separate. The application and its program need a Devnet deployment before you can use Phantom for deposits and payments."
+          );
         const tx = Transaction.from(Buffer.from(p.transaction, "base64"));
         await verifyPreparedTransaction(event, tx, await api("context"));
+        const preparedMessage = tx.serializeMessage();
         const signedTx = await wallet.signTransaction(tx);
+        if (!preparedMessage.equals(signedTx.serializeMessage()))
+          throw Error(
+            "Your wallet changed the prepared transaction. Retry with the transaction fee supplied by ctrl-mesh."
+          );
         transaction = Buffer.from(
           signedTx.serialize({ requireAllSignatures: false })
         ).toString("base64");
@@ -607,13 +679,24 @@ function download(name: string, data: string) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+type FieldOption = { value: string; label: string; disabled?: boolean };
+const fieldOptions = (options: FieldOption[], value = "") =>
+  options
+    .map(
+      (o) =>
+        `<option value="${escape(o.value)}"${
+          o.value === value ? " selected" : ""
+        }${o.disabled ? " disabled" : ""}>${escape(o.label)}</option>`
+    )
+    .join("");
 type Field = {
   name: string;
   label: string;
   value?: string;
   type?: string;
-  options?: { value: string; label: string }[];
+  options?: FieldOption[];
   required?: boolean;
+  hint?: string;
 };
 function form(
   title: string,
@@ -624,6 +707,7 @@ function form(
   $("dialog-title").textContent = title;
   $("dialog-error").textContent = "";
   $("dialog-submit").textContent = label;
+  $("dialog-submit").style.removeProperty("display");
   $("dialog-fields").innerHTML = fields
     .map(
       (f) =>
@@ -633,19 +717,16 @@ function form(
                 f.required === false ? "" : "required"
               }>${escape(f.value || "")}</textarea>`
             : f.options
-            ? `<select name="${f.name}">${f.options
-                .map(
-                  (o) =>
-                    `<option value="${escape(o.value)}">${escape(
-                      o.label
-                    )}</option>`
-                )
-                .join("")}</select>`
+            ? `<select name="${f.name}" ${
+                f.required === false ? "" : "required"
+              }>${fieldOptions(f.options, f.value)}</select>`
             : `<input name="${f.name}" type="${f.type || "text"}" ${
                 f.type === "number" ? 'min="0" step="any"' : ""
               } value="${escape(f.value || "")}" ${
                 f.required === false ? "" : "required"
               }>`
+        }${
+          f.hint ? `<small class="field-hint">${escape(f.hint)}</small>` : ""
         }</label>`
     )
     .join("");
@@ -672,6 +753,17 @@ const agentName = (pubkey: string) =>
   context.agents.find((a: any) => a.key === pubkey)?.name ||
   market.agents.find((a: any) => a.key === pubkey)?.name ||
   short(pubkey);
+const brandMark = `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M4 4l5 5M20 4l-5 5M4 20l5-5M20 20l-5-5"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg>`;
+function setSidebarOpen(open: boolean) {
+  const mobile = matchMedia("(max-width: 760px)").matches;
+  open = open && mobile;
+  document.body.classList.toggle("sidebar-open", open);
+  $("sidebar-toggle").setAttribute("aria-expanded", String(open));
+  $("sidebar-scrim").hidden = !open;
+  $("app-sidebar").inert = mobile && !open;
+  document.querySelector<HTMLElement>(".shell")!.inert = open;
+  if (open) $("sidebar-close").focus();
+}
 const badge = (state: string) =>
   `<span class="badge ${escape(state)}">${escape(
     state.replace(/_/g, " ")
@@ -731,7 +823,6 @@ function guardRoute() {
     if (!session) move(authPath("/login", next));
     else if (!session.actor && route.view !== "connect")
       move(authPath("/app/connect-wallet", next));
-    else if (session.actor && route.view === "connect") move(next);
   } else if (session && ["login", "register"].includes(route.view)) {
     move(session.actor ? nextPath() : authPath("/app/connect-wallet"));
   } else if (route.view === "verify") {
@@ -753,8 +844,8 @@ function renderAuth() {
     register: "Build with more agents.",
     forgot: "Reset your password.",
     reset: "Choose a new password.",
-    connect: session?.account.wallet
-      ? "Reconnect your wallet."
+    connect: linkedWallets().length
+      ? "Choose your signing wallet."
       : "Link your wallet.",
   };
   document.title = heading[view] + " · ctrl-mesh";
@@ -762,11 +853,9 @@ function renderAuth() {
   const password = `<label for="auth-password">Password</label><div class="password-field"><input id="auth-password" name="password" type="password" autocomplete="${
     view === "login" ? "current-password" : "new-password"
   }" ${
-    view === "login" ? "" : 'minlength="15"'
+    view === "login" ? "" : 'minlength="8"'
   } maxlength="128" required><button type="button" id="show-password" aria-label="Show password">Show</button></div>${
-    view === "login"
-      ? ""
-      : '<p class="field-hint">At least 15 characters. A few unrelated words work well.</p>'
+    view === "login" ? "" : '<p class="field-hint">At least 8 characters.</p>'
   }`;
   let content = "",
     bottom = "",
@@ -817,11 +906,20 @@ function renderAuth() {
     )}</strong>. Verify wallet ownership with a signature.`;
     const providers = walletProviders();
     content = `${
-      session!.account.wallet
-        ? `<div class="linked-address"><span class="small-label">LINKED WALLET</span><p class="hash">${escape(
-            session!.account.wallet
-          )}</p></div><p>Choose this same wallet in your wallet app.</p>`
-        : `<p>This wallet becomes the payment identity for your account. Each wallet can belong to one account.</p>`
+      linkedWallets().length
+        ? `<div class="linked-address"><span class="small-label">LINKED WALLETS</span>${linkedWallets()
+            .map(
+              (address) =>
+                `<p class="hash">${escape(address)}${
+                  address === key ? ' <span class="badge">ACTIVE</span>' : ""
+                }</p>`
+            )
+            .join("")}</div>`
+        : ""
+    }<p>One account can manage multiple wallets and agents. Select a linked wallet or a new wallet in your wallet app, then connect. A new wallet is added to this account after you sign.</p>${
+      walletAuthNotice
+        ? `<div class="notice" role="status">${escape(walletAuthNotice)}</div>`
+        : ""
     }<div class="auth-actions">${
       providers.length
         ? providers
@@ -835,12 +933,16 @@ function renderAuth() {
             )
             .join("")
         : '<div class="notice">No Solana wallet detected. Open this page in a browser with Phantom or Solflare, then refresh.</div><a class="button" href="https://phantom.com/" target="_blank" rel="noopener noreferrer">Get Phantom ↗</a>'
-    }</div><p class="tiny muted">Connecting signs a message. It does not send SOL or authorize a payment.</p><p id="auth-error" role="alert"></p>`;
-    bottom = button("logout", "Sign out", "", "quiet");
+    }</div><p class="tiny muted">Connecting signs a message. It does not send SOL or authorize a payment.</p><p id="auth-error" role="alert">${escape(
+      walletAuthError
+    )}</p>`;
+    bottom = `${
+      key ? routeLink(next, "Back to app", "auth-text-link") : ""
+    }${button("logout", "Sign out", "", "quiet")}`;
   }
   $(
     "content"
-  ).innerHTML = `<div class="auth-shell"><a href="/" class="auth-brand">ctrl-mesh<span>↗</span></a><div class="auth-progress" aria-label="Account setup"><span class="${
+  ).innerHTML = `<div class="auth-shell"><a href="/" class="auth-brand">${brandMark}<span>ctrl-mesh</span></a><div class="auth-progress" aria-label="Account setup"><span class="${
     ["login", "register", "forgot", "reset"].includes(view) ? "current" : ""
   }">01 Account</span><span class="${
     view === "connect" ? "current" : ""
@@ -905,6 +1007,8 @@ function render() {
   const auth = authViews.includes(route.view);
   document.body.classList.remove("auth-pending");
   document.body.classList.toggle("auth-page", auth);
+  document.body.dataset.view = view;
+  if (auth) setSidebarOpen(false);
   $("identity-key").textContent = key
     ? short(key)
     : session?.account.email || "Guest";
@@ -1014,6 +1118,9 @@ function render() {
       } as Partial<Record<View, string>>
     )[view] || "Workspace";
   document.title = $("header-title").textContent + " · ctrl-mesh";
+  $("solana-network").textContent = health.network
+    ? "SOLANA " + health.network.toUpperCase()
+    : "SOLANA · CONNECTING";
   if (route.view === "not-found") {
     renderUnavailable(
       "Page not found",
@@ -1022,18 +1129,60 @@ function render() {
     return;
   }
   if (view === "account") {
+    const wallets = linkedWallets(),
+      agents = market.agents.filter((agent: any) =>
+        wallets.includes(agent.owner)
+      );
     $(
       "content"
-    ).innerHTML = `<div class="split"><section class="panel"><span class="badge">WALLET LINKED</span><h2>${escape(
+    ).innerHTML = `<div class="split"><section class="panel"><span class="badge">${
+      wallets.length
+    } LINKED WALLETS</span><h2>${escape(
       session!.account.email
-    )}</h2><p class="small-label">LINKED SOLANA WALLET</p><p class="hash">${escape(
-      session!.account.wallet
-    )}</p><p>This wallet is uniquely linked to your email account. A different wallet cannot access this workspace.</p><p class="tiny muted">Session expires ${escape(
+    )}</h2><p class="small-label">SOLANA WALLETS</p>${wallets
+      .map(
+        (address) =>
+          `<div class="row"><p class="hash">${escape(address)}</p>${
+            address === key ? '<span class="badge">ACTIVE SIGNER</span>' : ""
+          }</div>`
+      )
+      .join(
+        ""
+      )}<p>Add more wallets to manage multiple agent identities from this account. The active wallet signs work and transactions.</p><p class="tiny muted">Session expires ${escape(
       new Date(session!.expires).toLocaleString()
-    )}</p><div class="actions">${button("logout", "Sign out")}${routeLink(
+    )}</p><div class="actions">${routeLink(
+      authPath("/app/connect-wallet", "/app/account"),
+      "Add or switch wallet",
+      "button primary"
+    )}${button("logout", "Sign out")}${routeLink(
       "/forgot-password",
       "Reset password"
-    )}</div></section><section class="panel"><h2>Your access</h2><p>${
+    )}</div></section><section class="panel"><h2>Your agents <span class="badge">${
+      agents.length
+    }</span></h2>${
+      agents.length
+        ? agents
+            .map(
+              (agent: any) =>
+                `<div class="row"><div>${routeLink(
+                  agentPath(agent.key),
+                  escape(agent.name)
+                )}<p class="hash">${escape(
+                  agent.key
+                )}</p><p class="tiny muted">Owner wallet ${escape(
+                  short(agent.owner)
+                )}${
+                  agent.owner === key
+                    ? " · active"
+                    : " · switch wallet to manage"
+                }</p></div></div>`
+            )
+            .join("")
+        : "<p>No agents registered to your linked wallets yet.</p>"
+    }<div class="actions">${button(
+      "register",
+      "Register an agent"
+    )}</div><h3>Active wallet access</h3><p>${
       context.projects.length
     } projects · ${
       context.jobs.length
@@ -1140,7 +1289,13 @@ function render() {
         : ""
     }</div><p class="tiny muted">Rotation protects future messages. It cannot erase copies or keys already received by others. Keep old keys for your history.</p><p class="hash">${
       record ? escape(JSON.parse(record.content).boxKey) : ""
-    }</p></section><section class="panel"><h2>Relay connection</h2>${badge(
+    }</p></section><section class="panel"><h2>Relay connection</h2><div class="row"><span>Solana network</span><strong>${escape(
+      health.network || "Connecting"
+    )}</strong></div>${
+      health.network === "devnet"
+        ? '<p class="tiny">Use Phantom Settings → Developer Settings → Testnet Mode → Solana Devnet. Deposits and payments use test SOL.</p>'
+        : ""
+    }${badge(
       health.ha
         ? "automatic failover"
         : health.readOnly
@@ -1157,6 +1312,14 @@ function render() {
         ? `<div class="row"><span>Active coordinator</span><strong>${escape(
             health.ha.node
           )}</strong></div><div class="row"><span>Agreement required</span><strong>2 of 3 nodes</strong></div><p class="tiny">A backup takes over automatically. Work and pending payments are preserved in the shared journal.</p>`
+        : ""
+    }${
+      health.solana
+        ? `<p class="tiny muted">Program</p><p class="hash">${escape(
+            health.solana.program
+          )}</p><p class="tiny muted">Genesis</p><p class="hash">${escape(
+            health.solana.genesis
+          )}</p>`
         : ""
     }<p class="tiny">Last successful sync: ${escape(
       f.lastSync || (health.readOnly ? "Waiting for peer" : "Primary journal")
@@ -1235,17 +1398,26 @@ function render() {
             .map((j: any) => jobCard(j))
             .join("")}</div>`
         : `<div class="empty"><h2>${
-            key ? "Your workspace is ready." : "Connect to your work network."
+            p
+              ? "This project has no tasks yet."
+              : key
+              ? "Your workspace is ready."
+              : "Connect to your work network."
           }</h2><p>${
-            key
+            p
+              ? manager(p) && !p.closed
+                ? "Create a funded task and choose Public market listing to invite agents through Task market."
+                : "Tasks appear here when the project owner or coordinator creates them."
+              : key
               ? "Create a project, delegate a budget to your coordinator, and invite independent agents to contribute."
               : "Browse the task market, or connect a wallet to create projects and publish signed actions."
-          }</p>${button(
-            "new-project",
-            "Create a project ↗",
-            "",
-            "primary"
-          )}</div>`);
+          }</p>${
+            p
+              ? manager(p) && !p.closed
+                ? button("new-task", "Publish your first task ↗", "", "primary")
+                : ""
+              : button("new-project", "Create a project ↗", "", "primary")
+          }</div>`);
     $("content").insertAdjacentHTML("beforeend", dependencyGraph(visible));
     const select = $("project-selector") as HTMLSelectElement | null;
     if (select)
@@ -1254,12 +1426,16 @@ function render() {
       };
   } else if (view === "market")
     $("content").innerHTML =
-      `<div class="section-head"><div><h2>Open opportunities <span class="badge">${market.jobs.length}</span></h2><p>Budgets are reserved in a Solana task vault.</p></div></div>` +
+      `<div class="section-head"><div><h2>Open opportunities <span class="badge">${market.jobs.length}</span></h2><p>Public tasks with budgets reserved in a Solana task vault. Publish a task from your project to list work here.</p></div></div>` +
       (market.jobs.length
         ? `<div class="grid">${market.jobs
             .map((j: any) => jobCard(j, true))
             .join("")}</div>`
-        : '<div class="empty"><h2>No open listings yet.</h2><p>Create a project and publish a task to start the agent work network.</p></div>');
+        : `<div class="empty"><h2>No public tasks yet.</h2><p>Open your project, create a funded task and choose Public market listing.</p>${routeLink(
+            "/app/projects",
+            "Open your projects →",
+            "button primary"
+          )}</div>`);
   else if (view === "agents")
     $(
       "content"
@@ -1325,7 +1501,7 @@ function dependencyGraph(jobs: any[]) {
   }
   const width = Math.max(...[...positions.values()].map((p) => p.x)) + 240,
     height = Math.max(...[...positions.values()].map((p) => p.y)) + 90;
-  return `<section class="panel graph-panel"><h3>Task dependencies</h3><p class="tiny muted">Accepted results unlock dependent work. Select a task to inspect its shared context.</p><div class="graph-scroll"><svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" aria-label="Task dependency graph"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#91a078"/></marker></defs>${jobs
+  return `<section class="panel graph-panel"><h3>Task dependencies</h3><p class="tiny muted">Accepted results unlock dependent work. Select a task to inspect its shared context.</p><div class="graph-scroll"><svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" aria-label="Task dependency graph"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#b5b2c4"/></marker></defs>${jobs
     .flatMap((j) =>
       j.dependencies.map((id: string) => {
         const from = positions.get(id),
@@ -1335,7 +1511,7 @@ function dependencyGraph(jobs: any[]) {
               from.y + 34
             },${to.x - 25} ${to.y + 34},${to.x} ${
               to.y + 34
-            }" fill="none" stroke="#91a078" stroke-width="1.5" marker-end="url(#arrow)"/>`
+            }" fill="none" stroke="#b5b2c4" stroke-width="1.5" marker-end="url(#arrow)"/>`
           : "";
       })
     )
@@ -1347,14 +1523,14 @@ function dependencyGraph(jobs: any[]) {
       )}" data-route aria-label="${escape(j.title)}"><g><rect x="${pos.x}" y="${
         pos.y
       }" width="215" height="68" rx="6" fill="${
-        j.state === "accepted" ? "#e4f5d9" : "#f6f7f2"
-      }" stroke="#c8d1bb"/><text x="${pos.x + 13}" y="${
+        j.state === "accepted" ? "#123b30" : "#191422"
+      }" stroke="#ffffff26"/><text x="${pos.x + 13}" y="${
         pos.y + 25
-      }" fill="#283421" font-size="12">${escape(
+      }" fill="#f2f1f7" font-size="12">${escape(
         j.title.length > 29 ? j.title.slice(0, 27) + "…" : j.title
       )}</text><text x="${pos.x + 13}" y="${
         pos.y + 48
-      }" fill="#6a785b" font-size="10">${escape(j.state.toUpperCase())} · REV ${
+      }" fill="#b5b2c4" font-size="10">${escape(j.state.toUpperCase())} · REV ${
         j.revision
       }</text></g></a>`;
     })
@@ -1607,6 +1783,28 @@ function renderDetail() {
         }</div></section>`
       : ""
   }<section class="panel section-head"><div><h3>Reviews</h3>${
+    p
+      ? `<p>Assigned reviewer: ${routeLink(
+          agentPath(p.reviewer),
+          escape(agentName(p.reviewer)),
+          "task-link"
+        )}</p><p class="hash">${escape(p.reviewer)}</p>${
+          j.state === "review"
+            ? `<p class="tiny">${
+                j.reviewRoot === j.root
+                  ? "This result version is approved. The project owner or coordinator can accept it."
+                  : isReviewer
+                  ? "Open the submitted files, then choose Approve review or Request changes."
+                  : "Waiting for this agent to sign a review. Review actions are available when signed in as the assigned reviewer."
+              }</p>`
+            : ""
+        }${
+          p.owner === key && !p.closed
+            ? button("policy", "Change reviewer", p.id)
+            : ""
+        }`
+      : ""
+  }${
     j.reviews.length
       ? j.reviews
           .map(
@@ -1625,9 +1823,13 @@ async function action(name: string, id: string) {
   if (name === "login-wallet") {
     if (authBusy) return;
     authBusy = true;
+    walletAuthError = "";
     render();
     try {
       await loginWallet(id);
+    } catch (e) {
+      if (route.view !== "connect") throw e;
+      walletAuthError = (e as Error).message;
     } finally {
       authBusy = false;
       if (route.view === "connect") render();
@@ -1774,17 +1976,68 @@ async function action(name: string, id: string) {
   }
   if (name === "new-project") {
     await ensureWallet();
-    return form(
+    const agents = context.agents as {
+        key: string;
+        owner: string;
+        name: string;
+      }[],
+      coordinators = agents.filter((agent) => agent.owner === key);
+    if (!coordinators.length) {
+      navigate("/app/agents");
+      toast(
+        "Register an agent owned by your wallet before creating a project."
+      );
+      return;
+    }
+    if (agents.length < 2) {
+      navigate("/app/agents");
+      toast(
+        "Register another agent or invite a reviewer before creating a project."
+      );
+      return;
+    }
+    const coordinator =
+        coordinators.find((agent) => agent.key === key) || coordinators[0],
+      agentOption = (agent: (typeof agents)[number]) => ({
+        value: agent.key,
+        label: `${agent.name} · ${short(agent.key)}`,
+      }),
+      reviewerOptions = (manager: string): FieldOption[] => [
+        {
+          value: "",
+          label: "Select a different agent to review results",
+          disabled: true,
+        },
+        ...agents.filter((agent) => agent.key !== manager).map(agentOption),
+      ];
+    form(
       "Create project",
       [
         { name: "title", label: "Title" },
         { name: "brief", label: "Brief", type: "textarea" },
         {
           name: "manager",
-          label: "Your registered coordinator agent public key",
+          label: "Coordinator agent",
+          value: coordinator.key,
+          options: coordinators.map(agentOption),
+          hint: "Only agents registered to your connected wallet can coordinate this project.",
         },
-        { name: "reviewer", label: "Registered reviewer public key" },
-        { name: "amount", label: "Deposit SOL", type: "number", value: "0.25" },
+        {
+          name: "reviewer",
+          label: "Reviewer agent",
+          options: reviewerOptions(coordinator.key),
+          hint: "Approves submitted results. Choose a different agent from the coordinator.",
+        },
+        {
+          name: "amount",
+          label: "Deposit SOL",
+          type: "number",
+          value: "0.25",
+          hint:
+            health.network === "devnet"
+              ? "Devnet test SOL. In Phantom, enable Testnet Mode and select Solana Devnet."
+              : undefined,
+        },
         {
           name: "allowance",
           label: "Delegated spend limit SOL",
@@ -1793,6 +2046,8 @@ async function action(name: string, id: string) {
         },
       ],
       async (v) => {
+        if (v.manager === v.reviewer)
+          throw Error("Choose a different agent to review results.");
         const createdProject = "project-" + Date.now();
         await publish({
           action: "project.create",
@@ -1808,6 +2063,22 @@ async function action(name: string, id: string) {
         navigate(projectPath(createdProject));
       }
     );
+    const managerSelect = document.querySelector<HTMLSelectElement>(
+        '#dialog select[name="manager"]'
+      )!,
+      reviewerSelect = document.querySelector<HTMLSelectElement>(
+        '#dialog select[name="reviewer"]'
+      )!;
+    managerSelect.onchange = () => {
+      const options = reviewerOptions(managerSelect.value),
+        current = options.some(
+          (option) => option.value === reviewerSelect.value
+        )
+          ? reviewerSelect.value
+          : "";
+      reviewerSelect.innerHTML = fieldOptions(options, current);
+    };
+    return;
   }
   if (name === "new-task")
     return form(
@@ -1838,6 +2109,7 @@ async function action(name: string, id: string) {
         {
           name: "visibility",
           label: "Visibility",
+          hint: "Public tasks appear in Task market so other agents can offer their work. Private tasks stay in your workspace.",
           options: [
             { value: "public", label: "Public market listing" },
             { value: "private", label: "Private workspace task" },
@@ -1940,6 +2212,7 @@ async function action(name: string, id: string) {
         },
       ],
       async (v) => {
+        await ensureWallet();
         let text = v.content,
           filePath = v.path;
         if (v.visibility === "encrypted") {
@@ -1993,7 +2266,7 @@ async function action(name: string, id: string) {
               JSON.stringify({ version: 1, taskId, worker: key, artifacts })
             ),
             signedHash = await wallet.signMessage(
-              Buffer.from(packageHash, "hex"),
+              walletSigningMessage("work-package", packageHash),
               "utf8"
             );
           pkg = {
@@ -2125,10 +2398,32 @@ async function action(name: string, id: string) {
           amount: Math.round(Number(v.amount) * 1e9),
         })
     );
-  if (name === "policy")
+  if (name === "policy") {
+    if (!p || p.owner !== key)
+      throw Error("Only the project owner can change the reviewer.");
+    const contributors = new Set(
+        context.jobs
+          .filter((task: any) => task.project === p.id)
+          .flatMap((task: any) =>
+            task.members.map((member: any) => member.worker)
+          )
+      ),
+      reviewers = context.agents.filter(
+        (agent: any) => agent.key !== p.manager && !contributors.has(agent.key)
+      );
     return form(
-      "Coordinator spending policy",
+      "Project permissions",
       [
+        {
+          name: "reviewer",
+          label: "Reviewer agent",
+          value: p.reviewer,
+          options: reviewers.map((agent: any) => ({
+            value: agent.key,
+            label: `${agent.name} · ${short(agent.key)}`,
+          })),
+          hint: "Choose an agent that can sign reviews. This selection applies to all tasks in this project. The reviewer must be different from the coordinator and contributors.",
+        },
         {
           name: "allowance",
           label: "Total cumulative allowance SOL",
@@ -2142,17 +2437,34 @@ async function action(name: string, id: string) {
           value: "24",
         },
       ],
-      async (v) =>
-        publish({
+      async (v) => {
+        if (!reviewers.some((agent: any) => agent.key === v.reviewer))
+          throw Error("Choose an independent registered reviewer.");
+        if (
+          v.reviewer !== p.reviewer &&
+          context.jobs.some(
+            (task: any) =>
+              task.project === p.id &&
+              Object.values(task.packages).some(
+                (artifact: any) => artifact.encrypted
+              )
+          )
+        )
+          throw Error(
+            "Encrypted results must be resubmitted with access for the new reviewer. Reviewer changes for encrypted results are not supported yet."
+          );
+        return publish({
           action: "project.policy",
           project: p.id,
           manager: p.manager,
-          reviewer: p.reviewer,
+          reviewer: v.reviewer,
           allowance: Math.round(Number(v.allowance) * 1e9),
           expires: now + Number(v.hours) * 3600 - 1,
           revision: p.revision,
-        })
+        });
+      }
     );
+  }
   if (name === "close-epoch")
     return form(
       "Close project epoch",
@@ -2276,6 +2588,25 @@ $("content").onclick = async (e) => {
 };
 $("new-project").onclick = () =>
   action("new-project", "").catch((e) => toast(e.message));
+$("sidebar-toggle").onclick = () => setSidebarOpen(true);
+for (const id of ["sidebar-close", "sidebar-scrim"])
+  $(id).onclick = () => {
+    setSidebarOpen(false);
+    $("sidebar-toggle").focus();
+  };
+document.addEventListener("keydown", (event) => {
+  if (
+    event.key === "Escape" &&
+    document.body.classList.contains("sidebar-open")
+  ) {
+    setSidebarOpen(false);
+    $("sidebar-toggle").focus();
+  }
+});
+matchMedia("(max-width: 760px)").addEventListener("change", () =>
+  setSidebarOpen(false)
+);
+setSidebarOpen(false);
 $("wallet").onclick = () =>
   session
     ? navigate("/app/account")

@@ -1,6 +1,7 @@
 import { createHash } from "crypto";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import nacl from "tweetnacl";
+import { verifyDigestSignature } from "./signatures";
 
 export type MeshEvent = {
   id: string;
@@ -111,9 +112,10 @@ export function verifyEvent(e: MeshEvent): Command {
     digest(
       JSON.stringify([0, e.pubkey, e.created_at, e.kind, e.tags, e.content])
     ) !== e.id ||
-    !nacl.sign.detached.verify(
-      Buffer.from(e.id, "hex"),
-      Buffer.from(e.sig, "hex"),
+    !verifyDigestSignature(
+      "event",
+      e.id,
+      e.sig,
       Buffer.from(e.pubkey, "hex")
     )
   )

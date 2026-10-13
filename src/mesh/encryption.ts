@@ -4,6 +4,7 @@ import { Buffer } from "buffer";
 import { sha256 } from "@noble/hashes/sha256";
 import { PublicKey } from "@solana/web3.js";
 import type { MeshEvent } from "./events";
+import { verifyDigestSignature } from "./signatures";
 export const PRIVATE_ALGORITHM = "x25519-xsalsa20-poly1305-v1";
 export const SEALED_FILE = "sealed.mesh.json";
 export type KeyDirectory = Record<string, MeshEvent>;
@@ -67,9 +68,10 @@ export function verifySignedEnvelope(event: MeshEvent): any {
   );
   if (
     id !== event.id ||
-    !nacl.sign.detached.verify(
-      Buffer.from(id, "hex"),
-      Buffer.from(event.sig, "hex"),
+    !verifyDigestSignature(
+      "event",
+      id,
+      event.sig,
       Buffer.from(event.pubkey, "hex")
     ) ||
     !/^[a-f0-9]{64}$/.test(event.pubkey)
